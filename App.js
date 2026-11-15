@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 
 import {
   View,
@@ -19,11 +19,17 @@ import {
   Modal,
   ActivityIndicator,
   AppState,
+  BackHandler,
+  useWindowDimensions,
 } from "react-native";
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
 import * as Clipboard from "expo-clipboard";
+import * as Brightness from "expo-brightness";
+import * as FileSystem from "expo-file-system/legacy";
+import * as MediaLibrary from "expo-media-library";
+import NetInfo from "@react-native-community/netinfo";
 
 import { Ionicons } from "@expo/vector-icons";
 
@@ -49,9 +55,14 @@ const C = {
   white: "#FFFFFF",
   text: "#201317",
   textMuted: "#736067",
-  muted: "#9C878F",
+  muted: "#85707A",
   border: "#EFE3E6",
   borderLight: "#F8EFF1",
+  red: "#DC2626",
+  redLight: "#FEE2E2",
+  amber: "#D97706",
+  amberLight: "#FEF3C7",
+  surface: "#FAF7F8",
   green: "#1B9962",
   greenLight: "#E8F8F0",
   orange: "#E07534",
@@ -62,6 +73,46 @@ const C = {
   shadow: "rgba(32, 19, 23, 0.05)",
   shadowMedium: "rgba(32, 19, 23, 0.10)",
 };
+
+const R = { sm: 12, md: 16, lg: 24 };
+const SP = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24 };
+
+const baht = (n) => "฿" + Number(n || 0).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+const CATEGORIES = [
+  { id: "food", label: "อาหาร", icon: "restaurant-outline", color: "#D97706", bg: "#FEF3C7" },
+  { id: "transport", label: "เดินทาง", icon: "car-outline", color: "#3884E8", bg: "#EDF4FE" },
+  { id: "stay", label: "ที่พัก", icon: "bed-outline", color: "#7651B5", bg: "#F1EAFE" },
+  { id: "activity", label: "กิจกรรม", icon: "ticket-outline", color: "#1B9962", bg: "#E8F8F0" },
+  { id: "shopping", label: "ช้อปปิ้ง", icon: "bag-handle-outline", color: "#D94D43", bg: "#FDE8E1" },
+  { id: "other", label: "อื่น ๆ", icon: "ellipsis-horizontal-circle-outline", color: "#85707A", bg: "#FAF7F8" },
+];
+
+const getCategory = (categoryId) =>
+  CATEGORIES.find((category) => category.id === categoryId) ||
+  CATEGORIES.find((category) => category.id === "other");
+
+function friendlyError(error) {
+  const message = String(error?.message || error || "").trim();
+  const normalized = message.toLowerCase();
+  if (!message) return "ทำรายการไม่สำเร็จ กรุณาลองใหม่อีกครั้ง";
+  if (normalized.includes("invalid login credentials")) return "อีเมลหรือรหัสผ่านไม่ถูกต้อง";
+  if (normalized.includes("email not confirmed")) return "กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ";
+  if (normalized.includes("user already registered")) return "อีเมลนี้สมัครสมาชิกไว้แล้ว";
+  if (normalized.includes("rate limit") || normalized.includes("over_email_send_rate_limit")) {
+    return "ดำเนินการถี่เกินไป กรุณารอสักครู่แล้วลองใหม่";
+  }
+  if (normalized.includes("network") || normalized.includes("fetch")) {
+    return "เชื่อมต่ออินเทอร์เน็ตไม่ได้ กรุณาตรวจสอบเครือข่ายแล้วลองใหม่";
+  }
+  if (normalized.includes("permission") || normalized.includes("row-level security")) {
+    return "ไม่มีสิทธิ์ทำรายการนี้ กรุณาตรวจสอบบัญชีหรือสิทธิ์สมาชิก";
+  }
+  if (normalized.includes("duplicate key") || normalized.includes("already exists")) {
+    return "ข้อมูลนี้มีอยู่แล้ว กรุณาตรวจสอบข้อมูลแล้วลองใหม่";
+  }
+  return message;
+}
 
 // ==========================================
 // 3. REUSABLE COMPONENTS
@@ -81,15 +132,43 @@ function Text({ style, ...props }) {
   );
 }
 
-function TextInput({ style, ...props }) {
+function TextInput({ style, inputRef, ...props }) {
   return (
     <NativeTextInput
+      ref={inputRef}
       {...props}
       style={[
         { lineHeight: 24, paddingVertical: 8 },
         style,
       ]}
     />
+  );
+}
+
+function Avatar({ name = "", uri, size = 40 }) {
+  const initial = String(name).trim().charAt(0).toUpperCase() || "?";
+  return (
+    <View
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size / 2,
+        backgroundColor: C.pinkLight,
+        borderWidth: 1,
+        borderColor: C.border,
+        alignItems: "center",
+        justifyContent: "center",
+        overflow: "hidden",
+      }}
+    >
+      {uri ? (
+        <Image source={{ uri }} style={{ width: size, height: size }} resizeMode="cover" />
+      ) : (
+        <Text style={{ color: C.pinkDark, fontFamily: "Prompt_600SemiBold", fontSize: Math.max(11, size * 0.38) }}>
+          {initial}
+        </Text>
+      )}
+    </View>
   );
 }
 
@@ -150,6 +229,133 @@ function Button({
   );
 }
 
+function Toast({ toast, onDismiss }) {
+  const translateY = useRef(new Animated.Value(-100)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    translateY.setValue(-100);
+    opacity.setValue(0);
+    Animated.parallel([
+      Animated.spring(translateY, {
+        toValue: 0,
+        useNativeDriver: true,
+        speed: 20,
+        bounciness: 5,
+      }),
+      Animated.timing(opacity, {
+        toValue: 1,
+        duration: 180,
+        useNativeDriver: true,
+      }),
+    ]).start();
+
+    const timer = setTimeout(() => {
+      Animated.parallel([
+        Animated.timing(translateY, {
+          toValue: -100,
+          duration: 220,
+          useNativeDriver: true,
+        }),
+        Animated.timing(opacity, {
+          toValue: 0,
+          duration: 180,
+          useNativeDriver: true,
+        }),
+      ]).start(({ finished }) => {
+        if (finished) onDismiss(toast.id);
+      });
+    }, 2200);
+
+    return () => clearTimeout(timer);
+  }, [toast, translateY, opacity, onDismiss]);
+
+  if (!toast) return null;
+  const isError = toast.type === "error";
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={{
+        position: "absolute",
+        top: SP.md,
+        left: SP.lg,
+        right: SP.lg,
+        zIndex: 10000,
+        elevation: 20,
+        minHeight: 48,
+        borderRadius: R.md,
+        paddingHorizontal: SP.lg,
+        paddingVertical: SP.sm,
+        flexDirection: "row",
+        alignItems: "center",
+        backgroundColor: isError ? C.redLight : C.greenLight,
+        opacity,
+        transform: [{ translateY }],
+        shadowColor: C.shadowMedium,
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.2,
+        shadowRadius: 12,
+      }}
+    >
+      <Ionicons
+        name={isError ? "alert-circle" : "checkmark-circle"}
+        size={20}
+        color={isError ? C.red : C.green}
+        style={{ marginRight: SP.sm }}
+      />
+      <Text style={{ flex: 1, color: C.text, fontSize: 13 }}>
+        {toast.message}
+      </Text>
+    </Animated.View>
+  );
+}
+
+function OfflineBanner({ visible }) {
+  const translateY = useRef(new Animated.Value(-28)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.spring(translateY, {
+        toValue: visible ? 0 : -28,
+        useNativeDriver: true,
+        speed: 24,
+        bounciness: 2,
+      }),
+      Animated.timing(opacity, {
+        toValue: visible ? 1 : 0,
+        duration: 180,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [visible, translateY, opacity]);
+
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={{
+        position: "absolute",
+        top: 0,
+        left: 0,
+        right: 0,
+        height: 28,
+        zIndex: 10001,
+        elevation: 21,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: C.text,
+        opacity,
+        transform: [{ translateY }],
+      }}
+    >
+      <Text style={{ color: C.white, fontFamily: "Prompt_500Medium", fontSize: 11, lineHeight: 18 }}>
+        ออฟไลน์ - ข้อมูลอาจไม่เป็นปัจจุบัน
+      </Text>
+    </Animated.View>
+  );
+}
+
 function Input({
   label,
   placeholder,
@@ -158,6 +364,13 @@ function Input({
   secureTextEntry = false,
   keyboardType = "default",
   icon,
+  autoCapitalize,
+  inputRef,
+  autoFocus,
+  returnKeyType,
+  onSubmitEditing,
+  error,
+  maxLength,
 }) {
   return (
     <View style={s.field}>
@@ -178,10 +391,17 @@ function Input({
           placeholderTextColor="#A8949B"
           value={value}
           onChangeText={onChangeText}
+          inputRef={inputRef}
+          autoFocus={autoFocus}
+          returnKeyType={returnKeyType}
+          onSubmitEditing={onSubmitEditing}
+          maxLength={maxLength}
           secureTextEntry={secureTextEntry}
           keyboardType={keyboardType}
           autoCapitalize={
-            keyboardType === "email-address"
+            autoCapitalize !== undefined
+              ? autoCapitalize
+              : keyboardType === "email-address"
               ? "none"
               : secureTextEntry
               ? "none"
@@ -190,6 +410,7 @@ function Input({
           autoCorrect={false}
         />
       </View>
+      {!!error && <Text style={s.inputErrorText}>{error}</Text>}
     </View>
   );
 }
@@ -346,6 +567,7 @@ export default function App() {
     Prompt_600SemiBold,
     Prompt_700Bold,
   });
+  const { width: windowWidth } = useWindowDimensions();
 
   // ----------------------------------------
   // SCREEN
@@ -353,6 +575,8 @@ export default function App() {
 
   const [screen, setScreen] = useState("landing");
   const [tab, setTab] = useState("home");
+  const [onboardingPage, setOnboardingPage] = useState(0);
+  const [isOffline, setIsOffline] = useState(false);
 
   // ----------------------------------------
   // USER
@@ -361,10 +585,11 @@ export default function App() {
   const [userId, setUserId] = useState(null);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [emailError, setEmailError] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [phone, setPhone] = useState("");
-  const [currency, setCurrency] = useState("บาท (THB)");
+  const [currency, setCurrency] = useState("THB");
 
   // ----------------------------------------
   // APPLICATION
@@ -373,6 +598,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [checkingSession, setCheckingSession] = useState(true);
   const [notice, setNotice] = useState(null);
+  const [toast, setToast] = useState(null);
   const [notificationRows, setNotificationRows] = useState([]);
   const [notificationModal, setNotificationModal] = useState(false);
   const [profileAvatarUrl, setProfileAvatarUrl] = useState("");
@@ -389,6 +615,7 @@ export default function App() {
   const [activeGroup, setActiveGroup] = useState(null);
   const [members, setMembers] = useState([]);
   const [groupExpenses, setGroupExpenses] = useState([]);
+  const [settlements, setSettlements] = useState([]);
 
   const [groupName, setGroupName] = useState("");
   const [joinCode, setJoinCode] = useState("");
@@ -409,10 +636,11 @@ export default function App() {
   const [tripTitle, setTripTitle] = useState("");
   const [tripDestination, setTripDestination] = useState("");
   const [tripBudget, setTripBudget] = useState("");
-
   const [expenseModal, setExpenseModal] = useState(false);
   const [expenseTitle, setExpenseTitle] = useState("");
   const [expenseAmount, setExpenseAmount] = useState("");
+  const [expenseCategory, setExpenseCategory] = useState("other");
+  const [expenseError, setExpenseError] = useState("");
   const [expenseTripId, setExpenseTripId] = useState(null);
   const [expensePayer, setExpensePayer] = useState(null);
   const [expenseParticipants, setExpenseParticipants] = useState([]);
@@ -420,8 +648,6 @@ export default function App() {
   const [tripExpenses, setTripExpenses] = useState([]);
   const [loadingExpenses, setLoadingExpenses] = useState(false);
   const [detailTab, setDetailTab] = useState("expenses"); // "expenses" | "settlement"
-  const [groupSwitcherModal, setGroupSwitcherModal] = useState(false);
-
   const [memberNicknames, setMemberNicknames] = useState({});
   const [editingMember, setEditingMember] = useState(null);
   const [editingNickInput, setEditingNickInput] = useState("");
@@ -430,11 +656,15 @@ export default function App() {
   const [splitMode, setSplitMode] = useState("equal"); // "equal" | "itemized"
   const [expenseItems, setExpenseItems] = useState([]); // [{ id, name, amount, participants }]
   const [expandedExpenses, setExpandedExpenses] = useState({}); // { [expId]: boolean }
+  const expenseAmountInputRef = useRef(null);
+  const expenseTitleInputRef = useRef(null);
 
   // QR Code & Payment states
   const [userQrData, setUserQrData] = useState(null); // { promptpay, bankName, accountName, qrUri, base64 }
   const [memberQrMap, setMemberQrMap] = useState({}); // { [userId]: { promptpay, bankName, accountName, qrUri, base64 } }
   const [viewingQrModal, setViewingQrModal] = useState(null); // { userId, name, amount, promptpay, bankName, accountName, qrUri }
+  const qrBrightnessBeforeOpen = useRef(null);
+  const onboardingScrollRef = useRef(null);
   const [qrSetupModal, setQrSetupModal] = useState(false);
   const [qrSetupTarget, setQrSetupTarget] = useState(null); // { userId, name }
   const [qrInputPromptPay, setQrInputPromptPay] = useState("");
@@ -488,6 +718,14 @@ export default function App() {
       actions: Array.isArray(actions) ? actions : null,
     });
   };
+
+  const showToast = (message, type = "success") => {
+    setToast({ id: Date.now() + Math.random(), message: String(message || ""), type });
+  };
+
+  const dismissToast = useCallback((id) => {
+    setToast((current) => current?.id === id ? null : current);
+  }, []);
 
   const persistProfile = async (profile) => {
     const { error } = await supabase.from("profiles").upsert(profile);
@@ -546,7 +784,7 @@ export default function App() {
       }
       const selection = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ["images"],
-        allowsEditing: true,
+        allowsEditing: category !== "qr",
         quality: 0.85,
         base64: true,
       });
@@ -568,9 +806,9 @@ export default function App() {
         setQrImageUri(url);
         setQrImageBase64("");
       }
-      showAlert("อัปโหลดสำเร็จ", "บันทึกรูปภาพขึ้นคลัง TripBuddies แล้ว");
+      showToast("บันทึกรูปภาพขึ้นคลัง TripBuddies แล้ว");
     } catch (error) {
-      showAlert("อัปโหลดรูปไม่สำเร็จ", error.message || "กรุณาลองใหม่อีกครั้ง");
+      showAlert("อัปโหลดรูปไม่สำเร็จ", friendlyError(error));
     } finally {
       setBusy(false);
     }
@@ -578,6 +816,7 @@ export default function App() {
 
   const noticeSheet = () => (
     <>
+      <OfflineBanner visible={isOffline} />
       <Modal
         visible={!!notice}
         transparent
@@ -613,6 +852,7 @@ export default function App() {
           </View>
         </View>
       </Modal>
+      <Toast toast={toast} onDismiss={dismissToast} />
     </>
   );
 
@@ -639,7 +879,7 @@ export default function App() {
 
       showAlert(
         "โหลดทริปไม่สำเร็จ",
-        error.message
+        friendlyError(error)
       );
 
       return [];
@@ -678,7 +918,7 @@ export default function App() {
         .in("trip_id", tripIds);
 
     if (expenseError) {
-      showAlert("โหลดสรุปค่าใช้จ่ายไม่สำเร็จ", expenseError.message);
+      showAlert("โหลดสรุปค่าใช้จ่ายไม่สำเร็จ", friendlyError(expenseError));
       return tripList;
     }
 
@@ -713,7 +953,7 @@ export default function App() {
 
       showAlert(
         "โหลดกลุ่มไม่สำเร็จ",
-        error.message
+        friendlyError(error)
       );
 
       return [];
@@ -731,6 +971,7 @@ export default function App() {
       setTotalBudget(0);
       setTotalSpent(0);
       setGroupExpenses([]);
+      setSettlements([]);
 
       return [];
     }
@@ -750,7 +991,7 @@ export default function App() {
 
       showAlert(
         "โหลดข้อมูลกลุ่มไม่สำเร็จ",
-        groupError.message
+        friendlyError(groupError)
       );
 
       return [];
@@ -789,7 +1030,7 @@ export default function App() {
     if (error) {
       showAlert(
         "โหลดสมาชิกไม่สำเร็จ",
-        error.message
+        friendlyError(error)
       );
 
       return [];
@@ -811,7 +1052,7 @@ export default function App() {
         .in("id", userIds);
 
     if (profileError) {
-      showAlert("โหลดโปรไฟล์สมาชิกไม่สำเร็จ", profileError.message);
+      showAlert("โหลดโปรไฟล์สมาชิกไม่สำเร็จ", friendlyError(profileError));
     }
 
     if (profiles && profiles.length > 0) {
@@ -855,9 +1096,11 @@ export default function App() {
     const loadedTrips = await loadTrips(userId, group.id);
     try {
       await loadGroupExpenses(group.id);
+      await loadSettlements(group.id);
     } catch (error) {
       setGroupExpenses([]);
-      showAlert("โหลดสรุปยอดกลุ่มไม่สำเร็จ", error.message);
+      setSettlements([]);
+      showAlert("โหลดสรุปยอดกลุ่มไม่สำเร็จ", friendlyError(error));
     }
     if (expenseModal) {
       setExpenseParticipants((loadedMembers || []).map((member) => member.user_id));
@@ -908,14 +1151,11 @@ export default function App() {
       setGroupCoverUrl("");
       setGroupModal(false);
 
-      showAlert(
-        "สำเร็จ!",
-        "สร้างกลุ่มเรียบร้อยแล้ว"
-      );
+      showToast("สร้างกลุ่มเรียบร้อยแล้ว");
     } catch (error) {
       showAlert(
         "สร้างกลุ่มไม่สำเร็จ",
-        error.message
+        friendlyError(error)
       );
     } finally {
       setGroupActionBusy(false);
@@ -939,7 +1179,7 @@ export default function App() {
     setGroupActionBusy(true);
 
     try {
-      const inviteCode = joinCode.trim();
+      const inviteCode = joinCode.trim().toUpperCase();
       const { data, error } = await supabase.rpc(
         "join_group_by_code",
         {
@@ -962,14 +1202,11 @@ export default function App() {
 
       setJoinCode("");
 
-      showAlert(
-        "สำเร็จ!",
-        "เข้าร่วมกลุ่มเรียบร้อยแล้ว"
-      );
+      showToast("เข้าร่วมกลุ่มเรียบร้อยแล้ว");
     } catch (error) {
       showAlert(
         "เข้าร่วมกลุ่มไม่สำเร็จ",
-        error.message
+        friendlyError(error)
       );
     } finally {
       setGroupActionBusy(false);
@@ -980,9 +1217,9 @@ export default function App() {
     if (!activeGroup?.invite_code) return;
     try {
       await Clipboard.setStringAsync(String(activeGroup.invite_code));
-      showAlert("สำเร็จ", "คัดลอกรหัสกลุ่มสำเร็จ!");
+      showToast("คัดลอกรหัสกลุ่มสำเร็จ!");
     } catch (error) {
-      showAlert("คัดลอกรหัสไม่สำเร็จ", error.message);
+      showAlert("คัดลอกรหัสไม่สำเร็จ", friendlyError(error));
     }
   };
 
@@ -1012,9 +1249,9 @@ export default function App() {
               setTrips([]);
               setGroupExpenses([]);
               if (updatedGroups.length) await selectGroup(updatedGroups[0]);
-              showAlert("สำเร็จ", isCreator ? "ลบกลุ่มเรียบร้อยแล้ว" : "ออกจากกลุ่มเรียบร้อยแล้ว");
+              showToast(isCreator ? "ลบกลุ่มเรียบร้อยแล้ว" : "ออกจากกลุ่มเรียบร้อยแล้ว");
             } catch (error) {
-              showAlert(isCreator ? "ลบกลุ่มไม่สำเร็จ" : "ออกจากกลุ่มไม่สำเร็จ", error.message);
+              showAlert(isCreator ? "ลบกลุ่มไม่สำเร็จ" : "ออกจากกลุ่มไม่สำเร็จ", friendlyError(error));
             } finally {
               setGroupActionBusy(false);
             }
@@ -1064,14 +1301,11 @@ export default function App() {
 
       await loadMembers(activeGroup.id);
 
-      showAlert(
-        "สำเร็จ!",
-        "เพิ่มสมาชิกเรียบร้อยแล้ว"
-      );
+      showToast("เพิ่มสมาชิกเรียบร้อยแล้ว");
     } catch (error) {
       showAlert(
         "เพิ่มสมาชิกไม่สำเร็จ",
-        error.message
+        friendlyError(error)
       );
     } finally {
       setGroupActionBusy(false);
@@ -1093,7 +1327,7 @@ export default function App() {
       .maybeSingle();
 
     if (error) {
-      showAlert("โหลดโปรไฟล์ไม่สำเร็จ", error.message);
+      showAlert("โหลดโปรไฟล์ไม่สำเร็จ", friendlyError(error));
     }
 
     const resolvedName =
@@ -1106,7 +1340,7 @@ export default function App() {
     setProfileAvatarUrl(data?.avatar_url || "");
     setProfileCoverUrl(data?.cover_url || "");
     const resolvedCurrency = data?.currency === "USD" ? "USD" : "THB";
-    setCurrency(resolvedCurrency === "USD" ? "ดอลลาร์ (USD)" : "บาท (THB)");
+    setCurrency(resolvedCurrency);
 
     if (!error) {
       try {
@@ -1121,21 +1355,21 @@ export default function App() {
           currency: resolvedCurrency,
         });
       } catch (err) {
-        showAlert("บันทึกโปรไฟล์ไม่สำเร็จ", err.message);
+        showAlert("บันทึกโปรไฟล์ไม่สำเร็จ", friendlyError(err));
       }
     }
 
+    let localQrParsed = null;
     try {
       const localQr = await AsyncStorage.getItem(`@tb_user_qr_${user.id}`);
       if (localQr) {
-        const parsed = JSON.parse(localQr);
-        setUserQrData(parsed);
-        setMemberQrMap((prev) => ({ ...prev, [user.id]: parsed }));
+        localQrParsed = JSON.parse(localQr);
+        setMemberQrMap((prev) => ({ ...prev, [user.id]: localQrParsed }));
       }
     } catch {}
 
     const extractedPhone = data?.phone || "";
-    const qr = data?.qr_code_url || extractedPhone
+    let qr = data?.qr_code_url || extractedPhone
       ? {
           promptpay: extractedPhone,
           bankName: "",
@@ -1144,6 +1378,13 @@ export default function App() {
           base64: "",
         }
       : null;
+    if (qr) {
+      qr = {
+        ...qr,
+        bankName: localQrParsed?.bankName || "",
+        accountName: qr.accountName || localQrParsed?.accountName || "",
+      };
+    }
     setUserQrData(qr);
     if (qr) {
       setMemberQrMap((prev) => ({ ...prev, [user.id]: qr }));
@@ -1168,9 +1409,11 @@ export default function App() {
       await loadTrips(user.id, firstGroup.id);
       try {
         await loadGroupExpenses(firstGroup.id);
+        await loadSettlements(firstGroup.id);
       } catch (expenseError) {
         setGroupExpenses([]);
-        showAlert("โหลดสรุปยอดกลุ่มไม่สำเร็จ", expenseError.message);
+        setSettlements([]);
+        showAlert("โหลดสรุปยอดกลุ่มไม่สำเร็จ", friendlyError(expenseError));
       }
     } else {
       setActiveGroup(null);
@@ -1179,16 +1422,27 @@ export default function App() {
       setTotalBudget(0);
       setTotalSpent(0);
       setGroupExpenses([]);
+      setSettlements([]);
     }
 
     try {
       await loadNotifications(user.id);
     } catch (notificationError) {
-      showAlert("โหลดการแจ้งเตือนไม่สำเร็จ", notificationError.message);
+      showAlert("โหลดการแจ้งเตือนไม่สำเร็จ", friendlyError(notificationError));
     }
 
     setTab("home");
     setScreen("home");
+  };
+
+  const showEntryScreen = async () => {
+    try {
+      const seen = await AsyncStorage.getItem("@tb_seen_onboarding");
+      setScreen(seen === "1" ? "landing" : "onboarding");
+    } catch (error) {
+      showAlert("เปิดหน้าเริ่มต้นไม่สำเร็จ", friendlyError(error));
+      setScreen("landing");
+    }
   };
 
   // ========================================
@@ -1216,12 +1470,15 @@ export default function App() {
           await loadUserData(data.session.user);
 
           if (!mounted) return;
+        } else {
+          await showEntryScreen();
         }
       } catch (error) {
         console.log(
           "Session error:",
           error.message
         );
+        if (mounted) await showEntryScreen();
       } finally {
         if (mounted) {
           setCheckingSession(false);
@@ -1248,6 +1505,7 @@ export default function App() {
           setUserQrData(null);
           setNotificationRows([]);
           setGroupExpenses([]);
+          setSettlements([]);
 
           setGroups([]);
           setActiveGroup(null);
@@ -1290,6 +1548,52 @@ export default function App() {
     return () => subscription.remove();
   }, []);
 
+  useEffect(() => NetInfo.addEventListener((state) => {
+    setIsOffline(
+      state.isConnected === false || state.isInternetReachable === false
+    );
+  }), []);
+
+  useEffect(() => {
+    if (!viewingQrModal) return undefined;
+    let active = true;
+
+    const brightenForQr = async () => {
+      try {
+        const previousBrightness = await Brightness.getBrightnessAsync();
+        if (!active) return;
+        qrBrightnessBeforeOpen.current = previousBrightness;
+        await Brightness.setBrightnessAsync(1);
+        if (!active) {
+          await Brightness.setBrightnessAsync(previousBrightness);
+          qrBrightnessBeforeOpen.current = null;
+        }
+      } catch {}
+    };
+
+    brightenForQr();
+    return () => {
+      active = false;
+      const previousBrightness = qrBrightnessBeforeOpen.current;
+      qrBrightnessBeforeOpen.current = null;
+      if (previousBrightness !== null) {
+        Brightness.setBrightnessAsync(previousBrightness).catch(() => {});
+      }
+    };
+  }, [!!viewingQrModal]);
+
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (screen === "tripDetail") { nav("groups"); return true; }
+      if (screen === "register") { setScreen("welcome"); return true; }
+      if (screen === "welcome") { showEntryScreen(); return true; }
+      if (["groups", "profile"].includes(screen)) { goHome(); return true; }
+      return false;
+    });
+    return () => sub.remove();
+  }, [screen]);
+
   // ========================================
   // 16. NAVIGATION
   // ========================================
@@ -1307,8 +1611,48 @@ export default function App() {
     if (screen === "register") {
       setScreen("welcome");
     } else {
-      setScreen("landing");
+      showEntryScreen();
     }
+  };
+
+  const isValidEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+
+  const handleEmailChange = (value) => {
+    setEmail(value);
+    setEmailError(
+      value.trim() && !isValidEmail(value)
+        ? "กรุณากรอกอีเมลให้ถูกต้อง"
+        : ""
+    );
+  };
+
+  const validateEmail = () => {
+    if (!isValidEmail(email)) {
+      setEmailError("กรุณากรอกอีเมลให้ถูกต้อง");
+      return false;
+    }
+    setEmailError("");
+    return true;
+  };
+
+  const finishOnboarding = async () => {
+    try {
+      await AsyncStorage.setItem("@tb_seen_onboarding", "1");
+      setOnboardingPage(0);
+      setScreen("landing");
+    } catch (error) {
+      showAlert("บันทึกการตั้งค่าไม่สำเร็จ", friendlyError(error));
+    }
+  };
+
+  const continueOnboarding = () => {
+    if (onboardingPage >= 2) {
+      finishOnboarding();
+      return;
+    }
+    const nextPage = onboardingPage + 1;
+    onboardingScrollRef.current?.scrollTo({ x: nextPage * windowWidth, animated: true });
+    setOnboardingPage(nextPage);
   };
 
   const nav = (next) => {
@@ -1324,11 +1668,12 @@ export default function App() {
 
   const login = async () => {
     if (!checkSupabase()) return;
+    if (!validateEmail()) return;
 
-    if (!email.trim() || !password) {
+    if (!password) {
       showAlert(
         "ข้อมูลไม่ครบ",
-        "กรุณากรอกอีเมลและรหัสผ่าน"
+        "กรุณากรอกรหัสผ่าน"
       );
 
       return;
@@ -1354,7 +1699,7 @@ export default function App() {
     } catch (error) {
       showAlert(
         "เข้าสู่ระบบไม่สำเร็จ",
-        error.message
+        friendlyError(error)
       );
     } finally {
       setBusy(false);
@@ -1369,10 +1714,10 @@ export default function App() {
     if (!checkSupabase()) return;
 
     Keyboard.dismiss();
+    if (!validateEmail()) return;
 
     if (
       !name.trim() ||
-      !email.trim() ||
       !password ||
       !confirm
     ) {
@@ -1447,7 +1792,7 @@ export default function App() {
                 qr_code_url: null,
               });
             } catch (profileError) {
-              showAlert("สร้างบัญชีแล้ว แต่บันทึกโปรไฟล์ไม่สำเร็จ", profileError.message);
+              showAlert("สร้างบัญชีแล้ว แต่บันทึกโปรไฟล์ไม่สำเร็จ", friendlyError(profileError));
               return;
             }
           }
@@ -1482,13 +1827,13 @@ export default function App() {
         }
 
         showAlert(
-          "สมัครสมาชิกล่าช้า (Email Rate Limit)",
-          "ระบบส่งอีเมลของ Supabase ถึงลิมิตฟรี แนะนำให้เข้าไปปิด 'Confirm email' ใน Supabase Dashboard (Auth > Providers > Email) เพื่อให้สมัครแล้วเข้าได้ทันที 100% โดยไม่ต้องส่งอีเมลครับ"
+          "ระบบกำลังยุ่ง",
+          "สมัครสมาชิกถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"
         );
       } else {
         showAlert(
           "สมัครสมาชิกไม่สำเร็จ",
-          error.message
+          friendlyError(error)
         );
       }
     } finally {
@@ -1506,7 +1851,7 @@ export default function App() {
     if (error) {
       showAlert(
         "ออกจากระบบไม่สำเร็จ",
-        error.message
+        friendlyError(error)
       );
 
       return;
@@ -1525,9 +1870,9 @@ export default function App() {
     try {
       await saveOwnProfile();
       setProfileModal(false);
-      showAlert("สำเร็จ", "บันทึกข้อมูลโปรไฟล์เรียบร้อยแล้ว");
+      showToast("บันทึกข้อมูลโปรไฟล์เรียบร้อยแล้ว");
     } catch (error) {
-      showAlert("บันทึกโปรไฟล์ไม่สำเร็จ", error.message);
+      showAlert("บันทึกโปรไฟล์ไม่สำเร็จ", friendlyError(error));
     } finally {
       setBusy(false);
     }
@@ -1616,15 +1961,13 @@ export default function App() {
 
       await loadTrips(userId, activeGroup.id);
       await loadGroupExpenses(activeGroup.id);
+      await loadSettlements(activeGroup.id);
 
-      showAlert(
-        "สำเร็จ!",
-        "บันทึกทริปลงในกลุ่มเรียบร้อยแล้ว"
-      );
+      showToast("บันทึกทริปลงในกลุ่มเรียบร้อยแล้ว");
     } catch (error) {
       showAlert(
         "สร้างทริปไม่สำเร็จ",
-        error.message
+        friendlyError(error)
       );
     } finally {
       setBusy(false);
@@ -1657,18 +2000,11 @@ export default function App() {
       return name ? `${name} (ฉัน)` : "ฉัน";
     }
     const found = members.find((m) => m.user_id === mId);
-    if (found?.profile?.full_name) {
-      return found.profile.full_name;
-    }
-    if (memberNicknames && memberNicknames[mId]) {
-      return memberNicknames[mId];
-    }
-    if (found) {
-      const idx = members.findIndex((m) => m.user_id === mId);
-      if (found.role === "owner") return "เจ้าของกลุ่ม 👑";
-      return `เพื่อนคนที่ ${idx + 1}`;
-    }
-    return "เพื่อนในกลุ่ม";
+    return (
+      memberNicknames[mId] ||
+      found?.profile?.full_name ||
+      (found?.role === "owner" ? "เจ้าของกลุ่ม 👑" : "เพื่อนในกลุ่ม")
+    );
   };
 
   const saveMemberNickname = async (targetUserId, newName) => {
@@ -1678,7 +2014,7 @@ export default function App() {
       try {
         await saveOwnProfile({ full_name: clean });
       } catch (error) {
-        showAlert("บันทึกชื่อไม่สำเร็จ", error.message);
+        showAlert("บันทึกชื่อไม่สำเร็จ", friendlyError(error));
         return;
       }
     }
@@ -1690,13 +2026,13 @@ export default function App() {
     try {
       await AsyncStorage.setItem("@tb_member_nicknames", JSON.stringify(updated));
     } catch (e) {
-      showAlert("บันทึกชื่อเล่นในเครื่องไม่สำเร็จ", e.message || "กรุณาลองใหม่");
+      showAlert("บันทึกชื่อเล่นในเครื่องไม่สำเร็จ", friendlyError(e));
       return;
     }
 
     setEditingMember(null);
     setEditingNickInput("");
-    showAlert("สำเร็จ", `ตั้งชื่อ "${clean}" เรียบร้อยแล้ว`);
+    showToast(`ตั้งชื่อ "${clean}" เรียบร้อยแล้ว`);
   };
 
   // ----------------------------------------
@@ -1767,11 +2103,34 @@ export default function App() {
       }
 
       setQrSetupModal(false);
-      showAlert("สำเร็จ!", `บันทึกข้อมูล QR Code ของ ${tName} เรียบร้อยแล้ว`);
+      showToast(`บันทึกข้อมูล QR Code ของ ${tName} เรียบร้อยแล้ว`);
     } catch (err) {
-      showAlert("บันทึกไม่สำเร็จ", err.message || "เกิดข้อผิดพลาด");
+      showAlert("บันทึกไม่สำเร็จ", friendlyError(err));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const saveQrImageToDevice = async () => {
+    if (!viewingQrModal?.qrUri) return;
+    try {
+      const permission = await MediaLibrary.requestPermissionsAsync();
+      if (permission.status !== "granted") {
+        showAlert("ต้องอนุญาตเข้าถึงรูปภาพ", "อนุญาตให้ TripBuddies บันทึกรูป QR ลงในเครื่อง");
+        return;
+      }
+      if (!FileSystem.cacheDirectory) {
+        throw new Error("ไม่พบพื้นที่จัดเก็บชั่วคราวในเครื่อง");
+      }
+      const destination = `${FileSystem.cacheDirectory}tripbuddies-qr-${Date.now()}.png`;
+      const download = await FileSystem.downloadAsync(viewingQrModal.qrUri, destination);
+      if (download.status < 200 || download.status >= 300) {
+        throw new Error("ดาวน์โหลดรูป QR ไม่สำเร็จ");
+      }
+      await MediaLibrary.saveToLibraryAsync(download.uri);
+      showToast("บันทึกรูปแล้ว เปิดในแอปธนาคารเพื่อสแกนได้เลย");
+    } catch (error) {
+      showAlert("บันทึก QR ลงเครื่องไม่สำเร็จ", friendlyError(error));
     }
   };
 
@@ -1795,7 +2154,7 @@ export default function App() {
               qr_code_url: null,
             });
           } catch (error) {
-            showAlert("ลบข้อมูลไม่สำเร็จ", error.message);
+            showAlert("ลบข้อมูลไม่สำเร็จ", friendlyError(error));
             return;
           }
           setMemberQrMap(updated);
@@ -1807,7 +2166,7 @@ export default function App() {
           } catch (cacheError) {
             console.log("QR cache cleanup failed:", cacheError.message);
           }
-          showAlert("สำเร็จ", "ลบข้อมูล QR Code เรียบร้อยแล้ว");
+          showToast("ลบข้อมูล QR Code เรียบร้อยแล้ว");
         },
       },
     ]);
@@ -1818,6 +2177,7 @@ export default function App() {
   // ----------------------------------------
 
   const addExpenseSubItem = () => {
+    setExpenseError("");
     setExpenseItems((prev) => [
       ...prev,
       {
@@ -1830,6 +2190,7 @@ export default function App() {
   };
 
   const removeExpenseSubItem = (itemId) => {
+    setExpenseError("");
     if (expenseItems.length <= 1) {
       showAlert("แจ้งเตือน", "ต้องมีรายการอาหารอย่างน้อย 1 เมนู");
       return;
@@ -1838,12 +2199,14 @@ export default function App() {
   };
 
   const updateExpenseSubItem = (itemId, field, value) => {
+    setExpenseError("");
     setExpenseItems((prev) =>
       prev.map((item) => (item.id === itemId ? { ...item, [field]: value } : item))
     );
   };
 
   const toggleSubItemParticipant = (itemId, pId) => {
+    setExpenseError("");
     setExpenseItems((prev) =>
       prev.map((item) => {
         if (item.id !== itemId) return item;
@@ -1857,6 +2220,7 @@ export default function App() {
   };
 
   const toggleSubItemSelectAll = (itemId) => {
+    setExpenseError("");
     setExpenseItems((prev) =>
       prev.map((item) => {
         if (item.id !== itemId) return item;
@@ -1876,7 +2240,7 @@ export default function App() {
     }));
   };
 
-  const calculateSettlement = (expensesList, membersList) => {
+  const calculateSettlement = (expensesList, membersList, payments = []) => {
     const net = {};
     const paidTotals = {};
     const owedTotals = {};
@@ -1942,6 +2306,13 @@ export default function App() {
       }
     });
 
+    payments.forEach((p) => {
+      const a = Number(p.amount) || 0;
+      if (a <= 0) return;
+      net[p.from_user] = (net[p.from_user] || 0) + a;
+      net[p.to_user] = (net[p.to_user] || 0) - a;
+    });
+
     const creditors = [];
     const debtors = [];
 
@@ -1994,8 +2365,9 @@ export default function App() {
     }
     const { data, error } = await supabase
       .from("expenses")
-      .select("id, group_id, trip_id, title, amount, paid_by, split_between, slip_url, is_settled")
-      .eq("group_id", groupId);
+      .select("id, group_id, trip_id, title, amount, paid_by, split_between, slip_url, is_settled, created_at")
+      .eq("group_id", groupId)
+      .order("created_at", { ascending: false });
     if (error) throw error;
     const expenseRows = data || [];
     const ids = expenseRows.map((expense) => expense.id);
@@ -2016,6 +2388,19 @@ export default function App() {
     ));
   };
 
+  const loadSettlements = async (groupId) => {
+    if (!groupId) {
+      setSettlements([]);
+      return;
+    }
+    const { data, error } = await supabase
+      .from("settlements")
+      .select("id, group_id, trip_id, from_user, to_user, amount, created_at")
+      .eq("group_id", groupId);
+    if (error) throw error;
+    setSettlements((data || []).map((r) => ({ ...r, amount: Number(r.amount) })));
+  };
+
   const loadNotifications = async (uid) => {
     if (!uid) return;
     const { data, error } = await supabase
@@ -2030,24 +2415,36 @@ export default function App() {
 
   const openNotifications = async () => {
     try {
-      const currentNotifications = await loadNotifications(userId);
-      const unreadIds = currentNotifications.filter((item) => !item.is_read).map((item) => item.id);
-      if (unreadIds.length) {
-        const { data: updatedRows, error } = await supabase
-          .from("notifications")
-          .update({ is_read: true })
-          .in("id", unreadIds)
-          .eq("user_id", userId)
-          .select("id");
-        if (error) throw error;
-        if ((updatedRows || []).length !== unreadIds.length) {
-          throw new Error("อัปเดตสถานะอ่านแล้วไม่ครบ กรุณาตรวจสอบสิทธิ์ฐานข้อมูล");
-        }
-        setNotificationRows((current) => current.map((item) => ({ ...item, is_read: true })));
-      }
+      await loadNotifications(userId);
       setNotificationModal(true);
     } catch (error) {
-      showAlert("โหลดการแจ้งเตือนไม่สำเร็จ", error.message);
+      showAlert("โหลดการแจ้งเตือนไม่สำเร็จ", friendlyError(error));
+    }
+  };
+
+  const closeNotifications = async () => {
+    setNotificationModal(false);
+    const unreadIds = notificationRows
+      .filter((item) => !item.is_read)
+      .map((item) => item.id);
+    if (!userId || !unreadIds.length) return;
+
+    try {
+      const { data: updatedRows, error } = await supabase
+        .from("notifications")
+        .update({ is_read: true })
+        .in("id", unreadIds)
+        .eq("user_id", userId)
+        .select("id");
+      if (error) throw error;
+      if (updatedRows?.length !== unreadIds.length) {
+        throw new Error("อัปเดตสถานะอ่านแล้วไม่ครบ กรุณาตรวจสอบสิทธิ์ฐานข้อมูล");
+      }
+      setNotificationRows((current) =>
+        current.map((item) => ({ ...item, is_read: true }))
+      );
+    } catch (error) {
+      showAlert("อัปเดตการแจ้งเตือนไม่สำเร็จ", friendlyError(error));
     }
   };
 
@@ -2057,8 +2454,9 @@ export default function App() {
     try {
       const { data, error } = await supabase
         .from("expenses")
-        .select("id, group_id, trip_id, title, amount, paid_by, split_between, slip_url, is_settled")
+        .select("id, group_id, trip_id, title, amount, paid_by, split_between, slip_url, is_settled, created_at")
         .eq("trip_id", tripId)
+        .order("created_at", { ascending: false });
 
       if (error) {
         throw error;
@@ -2082,7 +2480,7 @@ export default function App() {
       );
       setTripExpenses(parsed);
     } catch (err) {
-      showAlert("โหลดรายการค่าใช้จ่ายไม่สำเร็จ", err.message || "กรุณาลองใหม่");
+      showAlert("โหลดรายการค่าใช้จ่ายไม่สำเร็จ", friendlyError(err));
     } finally {
       setLoadingExpenses(false);
     }
@@ -2116,6 +2514,8 @@ export default function App() {
     setExpenseTripId(tid);
     setExpenseTitle("");
     setExpenseAmount("");
+    setExpenseCategory("other");
+    setExpenseError("");
     setExpensePayer(userId);
     setExpenseParticipants(members.map((m) => m.user_id));
     setSplitMode("equal");
@@ -2130,104 +2530,43 @@ export default function App() {
     setExpenseModal(true);
   };
 
-  const settleExpense = (expense) => {
-    showAlert(
-      "ยืนยันเคลียร์รายการ",
-      `ทำเครื่องหมายว่ารายการ "${expense.title}" จำนวน ฿${Number(expense.amount).toLocaleString()} เคลียร์ครบแล้วหรือไม่?`,
-      [
-        { text: "ยกเลิก", style: "cancel" },
-        {
-          text: "เคลียร์ยอด",
-          onPress: async () => {
-            setBusy(true);
-            try {
-              const { data: updatedRows, error } = await supabase
-                .from("expenses")
-                .update({ is_settled: true })
-                .eq("id", expense.id)
-                .eq("group_id", activeGroup.id)
-                .select("id");
-              if (error) throw error;
-              if (!updatedRows?.length) throw new Error("ไม่พบรายการหรือไม่มีสิทธิ์เคลียร์ยอด");
-              await loadTripExpenses(expense.trip_id);
-              await loadGroupExpenses(activeGroup.id);
-              showAlert("สำเร็จ", "ทำเครื่องหมายเคลียร์รายการแล้ว");
-            } catch (error) {
-              showAlert("เคลียร์ยอดไม่สำเร็จ", error.message);
-            } finally {
-              setBusy(false);
-            }
-          },
-        },
-      ]
-    );
-  };
-
-  const settleTransfer = (transfer) => {
-    const pair = [transfer.from, transfer.to];
-    const candidates = groupExpenses.filter((expense) => {
-      if (expense.is_settled || expense.paid_by !== transfer.to) return false;
-      if (expense.items?.length) {
-        return expense.items.every((item) =>
-          item.participants?.length &&
-          item.participants.every((id) => pair.includes(id))
-        ) && expense.items.some((item) => item.participants.includes(transfer.from));
-      }
-      return expense.participants?.includes(transfer.from) &&
-        expense.participants.every((id) => pair.includes(id));
-    });
-    const contribution = (expense) => {
-      if (expense.items?.length) {
-        return expense.items.reduce((sum, item) => {
-          if (!item.participants.includes(transfer.from)) return sum;
-          return sum + Number(item.amount || 0) / item.participants.length;
-        }, 0);
-      }
-      return Number(expense.amount || 0) / expense.participants.length;
-    };
-    const matched = [];
-    let remaining = transfer.amount;
-    for (const expense of candidates) {
-      const share = contribution(expense);
-      if (share > 0 && share <= remaining + 0.01) {
-        matched.push(expense);
-        remaining -= share;
-      }
-      if (remaining <= 0.01) break;
+  const settleTransfer = (transfer, tripId = null) => {
+    if (isOffline) {
+      showToast("ไม่มีอินเทอร์เน็ต", "error");
+      return;
     }
-    if (remaining > 0.01 || matched.length === 0) {
-      showAlert(
-        "เคลียร์ยอดแยกไม่ได้",
-        "ยอดนี้ไม่สามารถจับคู่กับบิลที่เคลียร์ได้พอดี กรุณาเคลียร์บิลที่เกี่ยวข้องทีละรายการ"
-      );
+    if (transfer.from !== userId && transfer.to !== userId) {
+      showAlert("ทำรายการไม่ได้", "บันทึกการโอนได้เฉพาะรายการที่คุณเป็นผู้โอนหรือผู้รับเงิน");
       return;
     }
     showAlert(
-      "ยืนยันเคลียร์ยอด",
-      `ทำเครื่องหมาย ${matched.length} บิลที่เกี่ยวข้องว่าเคลียร์แล้วหรือไม่?`,
+      "ยืนยันการโอนเงิน",
+      `บันทึกว่า ${getMemberName(transfer.from)} โอนให้ ${getMemberName(transfer.to)} จำนวน ${baht(transfer.amount)} แล้วใช่ไหม?`,
       [
         { text: "ยกเลิก", style: "cancel" },
         {
-          text: "เคลียร์ยอด",
+          text: "ยืนยัน",
           onPress: async () => {
-            setBusy(true);
             try {
-              const ids = matched.map((expense) => expense.id);
-              const { data: updatedRows, error } = await supabase
-                .from("expenses")
-                .update({ is_settled: true })
-                .in("id", ids)
-                .eq("group_id", activeGroup.id)
-                .select("id");
-              if (error) throw error;
-              if (updatedRows?.length !== ids.length) {
-                throw new Error("อัปเดตสถานะเคลียร์ยอดไม่ครบ กรุณาตรวจสอบสิทธิ์ฐานข้อมูล");
+              const connectivity = await NetInfo.fetch();
+              if (connectivity.isConnected === false || connectivity.isInternetReachable === false) {
+                setIsOffline(true);
+                showToast("ไม่มีอินเทอร์เน็ต", "error");
+                return;
               }
-              await loadGroupExpenses(activeGroup.id);
-              if (selectedTrip) await loadTripExpenses(selectedTrip.id);
-              showAlert("สำเร็จ", "อัปเดตสถานะเคลียร์ยอดเรียบร้อยแล้ว");
-            } catch (error) {
-              showAlert("เคลียร์ยอดไม่สำเร็จ", error.message);
+              setBusy(true);
+              const { error } = await supabase.from("settlements").insert({
+                group_id: activeGroup.id,
+                trip_id: tripId,
+                from_user: transfer.from,
+                to_user: transfer.to,
+                amount: transfer.amount,
+              });
+              if (error) throw error;
+              await loadSettlements(activeGroup.id);
+              showToast("บันทึกการโอนเรียบร้อยแล้ว");
+            } catch (e) {
+              showAlert("บันทึกไม่สำเร็จ", friendlyError(e));
             } finally {
               setBusy(false);
             }
@@ -2254,10 +2593,11 @@ export default function App() {
         if (activeGroup) {
           await loadTrips(userId, activeGroup.id);
           await loadGroupExpenses(activeGroup.id);
+          await loadSettlements(activeGroup.id);
         }
-        showAlert("สำเร็จ", "ลบรายการเรียบร้อยแล้ว");
+        showToast("ลบรายการเรียบร้อยแล้ว");
       } catch (error) {
-        showAlert("ลบไม่สำเร็จ", error.message || "ไม่สามารถลบรายการได้");
+        showAlert("ลบไม่สำเร็จ", friendlyError(error));
       } finally {
         setBusy(false);
       }
@@ -2274,26 +2614,27 @@ export default function App() {
   };
 
   const saveExpense = async () => {
+    if (isOffline) {
+      showToast("ไม่มีอินเทอร์เน็ต", "error");
+      return;
+    }
     if (!activeGroup || trips.length === 0) {
-      showAlert(
-        "ไม่พบทริป",
-        "กรุณาสร้างหรือเลือกทริปในกลุ่มก่อนบันทึกค่าใช้จ่าย"
-      );
+      setExpenseError("กรุณาสร้างหรือเลือกทริปในกลุ่มก่อนบันทึกค่าใช้จ่าย");
       return;
     }
 
     if (!expenseTitle.trim()) {
-      showAlert("ข้อมูลไม่ครบ", "กรุณาระบุชื่อรายการหรือชื่อร้านอาหาร");
+      setExpenseError("กรุณาระบุชื่อรายการหรือชื่อร้านอาหาร");
       return;
     }
 
     const targetTripId = expenseTripId || selectedTrip?.id || (trips[0] && trips[0].id);
     if (!targetTripId) {
-      showAlert("ไม่พบทริป", "กรุณาเลือกทริปที่ต้องการบันทึก");
+      setExpenseError("กรุณาเลือกทริปที่ต้องการบันทึก");
       return;
     }
     if (!trips.some((trip) => trip.id === targetTripId)) {
-      showAlert("ไม่พบทริป", "ทริปที่เลือกไม่อยู่ในกลุ่มปัจจุบัน กรุณาเลือกทริปใหม่");
+      setExpenseError("ทริปที่เลือกไม่อยู่ในกลุ่มปัจจุบัน กรุณาเลือกทริปใหม่");
       return;
     }
 
@@ -2302,29 +2643,23 @@ export default function App() {
     let amt = 0;
     if (splitMode === "itemized") {
       if (expenseItems.length === 0) {
-        showAlert("ข้อมูลไม่ครบ", "กรุณาเพิ่มอย่างน้อย 1 รายการอาหาร");
+        setExpenseError("กรุณาเพิ่มอย่างน้อย 1 รายการอาหาร");
         return;
       }
 
       for (let i = 0; i < expenseItems.length; i++) {
         const it = expenseItems[i];
         if (!it.name.trim()) {
-          showAlert("ข้อมูลไม่ครบ", `กรุณาระบุชื่อเมนูสำหรับรายการที่ ${i + 1}`);
+          setExpenseError(`กรุณาระบุชื่อเมนูสำหรับรายการที่ ${i + 1}`);
           return;
         }
         const itPrice = Number(String(it.amount).replace(/,/g, "")) || 0;
         if (itPrice <= 0) {
-          showAlert(
-            "ราคาไม่ถูกต้อง",
-            `กรุณากรอกราคาของเมนู "${it.name.trim()}" มากกว่า 0`
-          );
+          setExpenseError(`กรุณากรอกราคาของเมนู "${it.name.trim()}" มากกว่า 0`);
           return;
         }
         if (!it.participants || it.participants.length === 0) {
-          showAlert(
-            "ไม่มีผู้ร่วมหาร",
-            `กรุณาเลือกเพื่อนที่กินเมนู "${it.name.trim()}" อย่างน้อย 1 คน`
-          );
+          setExpenseError(`กรุณาเลือกเพื่อนที่กินเมนู "${it.name.trim()}" อย่างน้อย 1 คน`);
           return;
         }
         amt += itPrice;
@@ -2332,15 +2667,12 @@ export default function App() {
 
     } else {
       if (selectedParticipants.length === 0) {
-        showAlert("ไม่มีผู้ร่วมหาร", "กรุณาเลือกเพื่อนอย่างน้อย 1 คนเพื่อหารค่าใช้จ่าย");
+        setExpenseError("กรุณาเลือกเพื่อนอย่างน้อย 1 คนเพื่อหารค่าใช้จ่าย");
         return;
       }
       amt = Number(expenseAmount.replace(/,/g, "")) || 0;
       if (amt <= 0) {
-        showAlert(
-          "จำนวนเงินไม่ถูกต้อง",
-          "กรุณากรอกจำนวนเงินมากกว่า 0"
-        );
+        setExpenseError("กรุณากรอกจำนวนเงินมากกว่า 0");
         return;
       }
 
@@ -2352,6 +2684,7 @@ export default function App() {
       const { data: createdExpense, error } = await supabase.from("expenses").insert({
         group_id: activeGroup.id,
         title: expenseTitle.trim(),
+        category: expenseCategory,
         amount: amt,
         paid_by: payer,
         trip_id: targetTripId,
@@ -2387,20 +2720,19 @@ export default function App() {
       setExpenseTitle("");
       setExpenseAmount("");
       setExpenseItems([]);
+      setExpenseError("");
 
       if (selectedTrip && selectedTrip.id === targetTripId) {
         await loadTripExpenses(targetTripId);
       }
       await loadTrips(userId, activeGroup.id);
       await loadGroupExpenses(activeGroup.id);
+      await loadSettlements(activeGroup.id);
 
       const targetTrip = trips.find((t) => t.id === targetTripId);
-      showAlert(
-        "สำเร็จ!",
-        `บันทึกค่าใช้จ่าย ฿${amt.toLocaleString()} ในทริป "${targetTrip?.title || ""}" เรียบร้อยแล้ว`
-      );
+      showToast(`บันทึกค่าใช้จ่าย ${baht(amt)} ในทริป "${targetTrip?.title || ""}" เรียบร้อยแล้ว`);
     } catch (error) {
-      showAlert("บันทึกไม่สำเร็จ", error.message);
+      showAlert("บันทึกไม่สำเร็จ", friendlyError(error));
     } finally {
       setBusy(false);
     }
@@ -2521,89 +2853,90 @@ export default function App() {
               contentContainerStyle={{ paddingBottom: 10 }}
             >
               <Text style={s.modalTitle}>บันทึกค่าใช้จ่าย</Text>
-              {groups.length > 1 && (
-                <View style={{ marginBottom: 12 }}>
-                  <Text style={s.modalFieldTitle}>เลือกกลุ่ม</Text>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                    {groups.map((group) => {
-                      const selected = activeGroup?.id === group.id;
-                      return (
-                        <TouchableOpacity
-                          key={group.id}
-                          onPress={async () => {
-                            const selectedTrips = await selectGroup(group);
-                            if (!selectedTrips.length) {
-                              setExpenseModal(false);
-                              showAlert(
-                                "กลุ่มนี้ยังไม่มีทริป",
-                                "สร้างทริปก่อนจึงจะบันทึกค่าใช้จ่ายได้",
-                                [
-                                  { text: "สร้างทริป", onPress: createTrip },
-                                  { text: "ยกเลิก", style: "cancel" },
-                                ]
-                              );
-                            }
-                          }}
-                          style={[s.payerChip, selected && s.payerChipActive]}
-                        >
-                          <Text style={[s.payerChipText, selected && s.payerChipTextActive]}>
-                            {group.name}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </ScrollView>
-                </View>
+              <View style={s.expenseAmountHero}>
+                <Text style={s.expenseAmountCurrency}>฿</Text>
+                {splitMode === "equal" ? (
+                  <TextInput
+                    inputRef={expenseAmountInputRef}
+                    style={s.expenseAmountInput}
+                    placeholder="0.00"
+                    placeholderTextColor={C.pinkLight}
+                    value={expenseAmount}
+                    onChangeText={(value) => {
+                      setExpenseError("");
+                      setExpenseAmount(value);
+                    }}
+                    keyboardType="decimal-pad"
+                    autoFocus={splitMode === "equal"}
+                    returnKeyType="next"
+                    onSubmitEditing={() => expenseTitleInputRef.current?.focus()}
+                    selectTextOnFocus
+                  />
+                ) : (
+                  <Text style={s.expenseAmountValue}>
+                    {expenseItems
+                      .reduce((sum, item) => sum + (Number(String(item.amount).replace(/,/g, "")) || 0), 0)
+                      .toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </Text>
+                )}
+              </View>
+              {splitMode === "itemized" && (
+                <Text style={s.expenseAmountCaption}>ยอดรวมอาหาร</Text>
               )}
-              <Text style={s.modalSubtitle}>
-                {trips.find((t) => t.id === (expenseTripId || selectedTrip?.id || trips[0]?.id))?.title
-                  ? `ทริป: ${trips.find((t) => t.id === (expenseTripId || selectedTrip?.id || trips[0]?.id))?.title}`
-                  : "บันทึกรายจ่ายสำหรับทริปนี้"}
-              </Text>
 
-              {trips.length > 0 && (
-                <View style={{ marginBottom: 12 }}>
-                  <Text style={s.modalFieldTitle}>เลือกทริป</Text>
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    style={{ maxHeight: 40 }}
-                  >
-                    {trips.map((t) => {
-                      const isSelected = (expenseTripId || selectedTrip?.id || trips[0]?.id) === t.id;
-                      return (
-                        <TouchableOpacity
-                          key={t.id}
-                          onPress={() => setExpenseTripId(t.id)}
-                          style={{
-                            paddingVertical: 6,
-                            paddingHorizontal: 12,
-                            borderRadius: 16,
-                            backgroundColor: isSelected ? C.pink : C.pinkLight,
-                            marginRight: 8,
-                          }}
-                        >
-                          <Text
-                            style={{
-                              fontFamily: "Prompt_500Medium",
-                              fontSize: 12,
-                              color: isSelected ? C.white : C.text,
-                            }}
-                          >
-                            {t.title}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </ScrollView>
-                </View>
-              )}
+              <Input
+                inputRef={expenseTitleInputRef}
+                label={splitMode === "itemized" ? "ชื่อร้าน / ชื่อมื้ออาหาร" : "ชื่อรายการ"}
+                placeholder={splitMode === "itemized" ? "เช่น มื้อเย็นร้านป้าสมใจ, ข้าวแกง" : "เช่น ค่าอาหารค่ำ, ค่าน้ำมัน"}
+                value={expenseTitle}
+                onChangeText={(value) => {
+                  setExpenseError("");
+                  setExpenseTitle(value);
+                }}
+                returnKeyType="next"
+                onSubmitEditing={() => Keyboard.dismiss()}
+                icon="receipt-outline"
+              />
+
+              <Text style={s.modalFieldTitle}>หมวดหมู่</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={s.categoryPicker}
+                contentContainerStyle={s.categoryPickerContent}
+              >
+                {CATEGORIES.map((category) => {
+                  const selected = expenseCategory === category.id;
+                  return (
+                    <TouchableOpacity
+                      key={category.id}
+                      style={[
+                        s.categoryChip,
+                        { backgroundColor: selected ? category.bg : C.white, borderColor: selected ? category.color : C.border },
+                      ]}
+                      onPress={() => {
+                        setExpenseError("");
+                        setExpenseCategory(category.id);
+                      }}
+                      activeOpacity={0.75}
+                    >
+                      <Ionicons name={category.icon} size={16} color={category.color} />
+                      <Text style={[s.categoryChipText, { color: selected ? category.color : C.textMuted }]}>
+                        {category.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
 
               {/* SPLIT MODE SELECTOR */}
               <View style={s.splitModeSelector}>
                 <TouchableOpacity
                   style={[s.splitModeTab, splitMode === "equal" && s.splitModeTabActive]}
-                  onPress={() => setSplitMode("equal")}
+                  onPress={() => {
+                    setExpenseError("");
+                    setSplitMode("equal");
+                  }}
                   activeOpacity={0.8}
                 >
                   <Ionicons
@@ -2627,7 +2960,9 @@ export default function App() {
                     splitMode === "itemized" && s.splitModeTabActive,
                   ]}
                   onPress={() => {
+                    setExpenseError("");
                     setSplitMode("itemized");
+                    setExpenseCategory("food");
                     if (expenseItems.length === 0) {
                       setExpenseItems([
                         {
@@ -2657,32 +2992,16 @@ export default function App() {
                 </TouchableOpacity>
               </View>
 
-              <Input
-                label={splitMode === "itemized" ? "ชื่อร้าน / ชื่อมื้ออาหาร" : "ชื่อรายการ"}
-                placeholder={splitMode === "itemized" ? "เช่น มื้อเย็นร้านป้าสมใจ, ข้าวแกง" : "เช่น ค่าอาหารค่ำ, ค่าน้ำมัน"}
-                value={expenseTitle}
-                onChangeText={setExpenseTitle}
-                icon="receipt-outline"
-              />
-
               {/* EQUAL SPLIT MODE */}
               {splitMode === "equal" && (
                 <>
-                  <Input
-                    label="จำนวนเงิน (บาท)"
-                    placeholder="เช่น 1200"
-                    value={expenseAmount}
-                    onChangeText={setExpenseAmount}
-                    keyboardType="decimal-pad"
-                    icon="cash-outline"
-                  />
-
                   {/* PARTICIPANTS SPLIT SELECTION */}
                   <View style={{ marginBottom: 14 }}>
                     <View style={s.splitHeaderRow}>
                       <Text style={s.modalFieldTitle}>ใครต้องร่วมหารบ้าง?</Text>
                       <TouchableOpacity
                         onPress={() => {
+                          setExpenseError("");
                           if (expenseParticipants.length === members.length) {
                             setExpenseParticipants([]);
                           } else {
@@ -2711,6 +3030,7 @@ export default function App() {
                             ]}
                             activeOpacity={0.75}
                             onPress={() => {
+                              setExpenseError("");
                               if (isChecked) {
                                 setExpenseParticipants(
                                   expenseParticipants.filter((id) => id !== m.user_id)
@@ -2720,10 +3040,10 @@ export default function App() {
                               }
                             }}
                           >
-                            <Ionicons
-                              name={isChecked ? "checkbox" : "square-outline"}
-                              size={18}
-                              color={isChecked ? C.pinkDark : C.muted}
+                            <Avatar
+                              name={mName}
+                              uri={m.profile?.avatar_url}
+                              size={22}
                             />
                             <Text
                               style={[
@@ -2734,6 +3054,11 @@ export default function App() {
                             >
                               {mName}
                             </Text>
+                            <Ionicons
+                              name={isChecked ? "checkmark-circle" : "ellipse-outline"}
+                              size={16}
+                              color={isChecked ? C.pinkDark : C.border}
+                            />
                           </TouchableOpacity>
                         );
                       })}
@@ -2747,14 +3072,10 @@ export default function App() {
                           <Text style={s.splitPreviewText}>
                             หาร {expenseParticipants.length} คน ตกคนละ{" "}
                             <Text style={s.splitPreviewHighlight}>
-                              ฿
-                              {(
+                              {baht(
                                 Number(expenseAmount.replace(/,/g, "")) /
                                 expenseParticipants.length
-                              ).toLocaleString(undefined, {
-                                minimumFractionDigits: 2,
-                                maximumFractionDigits: 2,
-                              })}
+                              )}
                             </Text>
                           </Text>
                         </View>
@@ -2768,7 +3089,7 @@ export default function App() {
                 <View style={{ marginBottom: 14 }}>
                   {/* FOOD MODE BANNER */}
                   <View style={s.itemizedBanner}>
-                    <Ionicons name="sparkles" size={16} color="#D97706" />
+                    <Ionicons name="sparkles" size={16} color={C.amber} />
                     <Text style={s.itemizedBannerText}>
                       ใส่แต่ละเมนูที่สั่ง และเลือกเฉพาะเพื่อนที่กินเมนูนั้นๆ เพื่อนที่ไม่กินจะไม่ต้องร่วมจ่ายเมนูนี้ครับ
                     </Text>
@@ -2791,7 +3112,7 @@ export default function App() {
                               onPress={() => removeExpenseSubItem(item.id)}
                               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                             >
-                              <Ionicons name="trash-outline" size={16} color="#DC2626" />
+                              <Ionicons name="trash-outline" size={16} color={C.red} />
                             </TouchableOpacity>
                           )}
                         </View>
@@ -2843,11 +3164,10 @@ export default function App() {
                                   activeOpacity={0.75}
                                   onPress={() => toggleSubItemParticipant(item.id, m.user_id)}
                                 >
-                                  <Ionicons
-                                    name={isChecked ? "checkmark-circle" : "ellipse-outline"}
-                                    size={13}
-                                    color={isChecked ? C.white : C.muted}
-                                    style={{ marginRight: 4 }}
+                                  <Avatar
+                                    name={mName}
+                                    uri={m.profile?.avatar_url}
+                                    size={22}
                                   />
                                   <Text
                                     style={[
@@ -2858,6 +3178,12 @@ export default function App() {
                                   >
                                     {mName}
                                   </Text>
+                                  <Ionicons
+                                    name={isChecked ? "checkmark-circle" : "ellipse-outline"}
+                                    size={14}
+                                    color={isChecked ? C.white : C.muted}
+                                    style={{ marginLeft: 4 }}
+                                  />
                                 </TouchableOpacity>
                               );
                             })}
@@ -2867,7 +3193,7 @@ export default function App() {
                             <View style={s.subItemSharePreview}>
                               <Ionicons name="people-outline" size={12} color={C.blue} />
                               <Text style={s.subItemSharePreviewText}>
-                                หาร {item.participants.length} คน (คนละ ฿{itShare.toFixed(2)})
+                                หาร {item.participants.length} คน (คนละ {baht(itShare)})
                               </Text>
                             </View>
                           )}
@@ -2891,10 +3217,10 @@ export default function App() {
                     <View style={s.itemizedTotalRow}>
                       <Text style={s.itemizedTotalLabel}>ยอดรวมอาหารทั้งหมด:</Text>
                       <Text style={s.itemizedTotalValue}>
-                        ฿{expenseItems.reduce(
+                        {baht(expenseItems.reduce(
                           (sum, it) => sum + (Number(String(it.amount).replace(/,/g, "")) || 0),
                           0
-                        ).toLocaleString()}
+                        ))}
                       </Text>
                     </View>
 
@@ -2918,7 +3244,7 @@ export default function App() {
                             {mName} <Text style={{ color: C.muted, fontSize: 11 }}>({eatenCount} เมนู)</Text>
                           </Text>
                           <Text style={s.itemizedMemberShareAmt}>
-                            ฿{Math.round(mShare * 100) / 100}
+                            {baht(Math.round(mShare * 100) / 100)}
                           </Text>
                         </View>
                       );
@@ -2941,18 +3267,20 @@ export default function App() {
                     return (
                       <TouchableOpacity
                         key={m.user_id}
-                        onPress={() => setExpensePayer(m.user_id)}
+                        onPress={() => {
+                          setExpenseError("");
+                          setExpensePayer(m.user_id);
+                        }}
                         style={[
                           s.payerChip,
                           isSelected && s.payerChipActive,
                         ]}
                         activeOpacity={0.8}
                       >
-                        <Ionicons
-                          name={isSelected ? "checkmark-circle" : "person-outline"}
-                          size={15}
-                          color={isSelected ? C.white : C.textMuted}
-                          style={{ marginRight: 6 }}
+                        <Avatar
+                          name={mName}
+                          uri={m.profile?.avatar_url}
+                          size={22}
                         />
                         <Text
                           style={[
@@ -2962,12 +3290,106 @@ export default function App() {
                         >
                           {mName}
                         </Text>
+                        {isSelected && (
+                          <Ionicons
+                            name="checkmark-circle"
+                            size={15}
+                            color={C.white}
+                            style={{ marginLeft: 4 }}
+                          />
+                        )}
                       </TouchableOpacity>
                     );
                   })}
                 </ScrollView>
               </View>
 
+              {groups.length > 1 && (
+                <View style={{ marginBottom: 12 }}>
+                  <Text style={s.modalFieldTitle}>เลือกกลุ่ม</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                    {groups.map((group) => {
+                      const selected = activeGroup?.id === group.id;
+                      return (
+                        <TouchableOpacity
+                          key={group.id}
+                          onPress={async () => {
+                            setExpenseError("");
+                            const selectedTrips = await selectGroup(group);
+                            if (!selectedTrips.length) {
+                              setExpenseModal(false);
+                              showAlert(
+                                "กลุ่มนี้ยังไม่มีทริป",
+                                "สร้างทริปก่อนจึงจะบันทึกค่าใช้จ่ายได้",
+                                [
+                                  { text: "สร้างทริป", onPress: createTrip },
+                                  { text: "ยกเลิก", style: "cancel" },
+                                ]
+                              );
+                            }
+                          }}
+                          style={[s.payerChip, selected && s.payerChipActive]}
+                        >
+                          <Text style={[s.payerChipText, selected && s.payerChipTextActive]}>
+                            {group.name}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+              )}
+              <Text style={s.modalSubtitle}>
+                {trips.find((t) => t.id === (expenseTripId || selectedTrip?.id || trips[0]?.id))?.title
+                  ? `ทริป: ${trips.find((t) => t.id === (expenseTripId || selectedTrip?.id || trips[0]?.id))?.title}`
+                  : "บันทึกรายจ่ายสำหรับทริปนี้"}
+              </Text>
+              {trips.length > 0 && (
+                <View style={{ marginBottom: 12 }}>
+                  <Text style={s.modalFieldTitle}>เลือกทริป</Text>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    style={{ maxHeight: 40 }}
+                  >
+                    {trips.map((t) => {
+                      const isSelected = (expenseTripId || selectedTrip?.id || trips[0]?.id) === t.id;
+                      return (
+                        <TouchableOpacity
+                          key={t.id}
+                          onPress={() => {
+                            setExpenseError("");
+                            setExpenseTripId(t.id);
+                          }}
+                          style={{
+                            paddingVertical: 6,
+                            paddingHorizontal: 12,
+                            borderRadius: R.md,
+                            backgroundColor: isSelected ? C.pink : C.pinkLight,
+                            marginRight: 8,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontFamily: "Prompt_500Medium",
+                              fontSize: 13,
+                              color: isSelected ? C.white : C.text,
+                            }}
+                          >
+                            {t.title}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+              )}
+
+              {!!expenseError && (
+                <Text style={s.expenseError}>
+                  {expenseError}
+                </Text>
+              )}
               <Button
                 title={busy ? "กำลังบันทึก..." : "บันทึกค่าใช้จ่าย"}
                 onPress={saveExpense}
@@ -2982,6 +3404,7 @@ export default function App() {
                   setExpenseTitle("");
                   setExpenseAmount("");
                   setExpenseItems([]);
+                  setExpenseError("");
                 }}
                 style={{ marginTop: 10 }}
               />
@@ -3007,11 +3430,8 @@ export default function App() {
             {viewingQrModal?.amount > 0 && (
               <View style={s.modalAmountBanner}>
                 <Text style={s.modalAmountLabel}>ยอดที่ต้องโอน</Text>
-                <Text style={s.modalAmountVal}>
-                  ฿{Number(viewingQrModal.amount).toLocaleString(undefined, {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}
+                <Text style={[s.modalAmountVal, { fontSize: 30, color: C.pinkDark }]}>
+                  {baht(viewingQrModal.amount)}
                 </Text>
               </View>
             )}
@@ -3053,6 +3473,17 @@ export default function App() {
               )}
             </View>
 
+            {!!viewingQrModal?.qrUri && (
+              <TouchableOpacity
+                style={s.qrSaveButton}
+                activeOpacity={0.8}
+                onPress={saveQrImageToDevice}
+              >
+                <Ionicons name="download-outline" size={17} color={C.pinkDark} />
+                <Text style={s.qrSaveButtonText}>บันทึก QR ลงเครื่อง</Text>
+              </TouchableOpacity>
+            )}
+
             {(!!viewingQrModal?.promptpay || !!viewingQrModal?.bankName) && (
               <View style={s.qrMetaCard}>
                 {!!viewingQrModal?.promptpay && (
@@ -3061,8 +3492,9 @@ export default function App() {
                     <Text style={s.qrMetaValue}>{viewingQrModal.promptpay}</Text>
                     <TouchableOpacity
                       style={s.copyMiniBtn}
-                      onPress={() => {
-                        showAlert("คัดลอกแล้ว", `คัดลอก ${viewingQrModal.promptpay} เรียบร้อยแล้ว`);
+                      onPress={async () => {
+                        await Clipboard.setStringAsync(String(viewingQrModal.promptpay));
+                        showToast(`คัดลอก ${viewingQrModal.promptpay} เรียบร้อยแล้ว`);
                       }}
                     >
                       <Ionicons name="copy-outline" size={14} color={C.pinkDark} />
@@ -3081,7 +3513,7 @@ export default function App() {
             )}
 
             <Text style={s.qrScanTipText}>
-              💡 เปิดแอปธนาคารใดก็ได้เพื่อสแกน QR Code หรือแคปหน้าจอเพื่อเปิดสแกนในแอปธนาคาร
+              💡 เปิดแอปธนาคาร → สแกนจากรูปในเครื่อง
             </Text>
 
             <View style={{ width: "100%", flexDirection: "row", marginTop: 14 }}>
@@ -3160,8 +3592,8 @@ export default function App() {
                         setQrImageBase64("");
                       }}
                     >
-                      <Ionicons name="trash-outline" size={14} color="#DC2626" />
-                      <Text style={[s.qrImagePickAgainText, { color: "#DC2626" }]}>ลบรูป</Text>
+                      <Ionicons name="trash-outline" size={14} color={C.red} />
+                      <Text style={[s.qrImagePickAgainText, { color: C.red }]}>ลบรูป</Text>
                     </TouchableOpacity>
                   </View>
                 </View>
@@ -3224,9 +3656,9 @@ export default function App() {
         visible={notificationModal}
         transparent
         animationType="slide"
-        onRequestClose={() => setNotificationModal(false)}
+        onRequestClose={closeNotifications}
       >
-        <Pressable style={s.sheetOverlay} onPress={() => setNotificationModal(false)}>
+        <Pressable style={s.sheetOverlay} onPress={closeNotifications}>
           <Pressable style={[s.bottomSheet, { maxHeight: "78%" }]} onPress={() => {}}>
             <View style={s.sheetHandle} />
             <Text style={s.modalTitle}>การแจ้งเตือน</Text>
@@ -3253,7 +3685,7 @@ export default function App() {
                 ))}
               </ScrollView>
             )}
-            <Button title="ปิด" outline onPress={() => setNotificationModal(false)} style={{ marginTop: 10 }} />
+            <Button title="ปิด" outline onPress={closeNotifications} style={{ marginTop: 10 }} />
           </Pressable>
         </Pressable>
       </Modal>
@@ -3280,6 +3712,86 @@ export default function App() {
         </Text>
         {noticeSheet()}
       </View>
+    );
+  }
+
+  if (screen === "onboarding") {
+    const slides = [
+      {
+        icon: "people-outline",
+        title: "สร้างกลุ่มเที่ยวกับเพื่อน",
+        description: "วางแผนทริปร่วมกันในกลุ่มเดียว",
+      },
+      {
+        icon: "restaurant-outline",
+        title: "จดบิลหารง่าย แยกตามเมนูได้",
+        description: "รู้ชัดว่าใครกินอะไร และต้องจ่ายเท่าไร",
+      },
+      {
+        icon: "qr-code-outline",
+        title: "โอนผ่าน QR จบในแอปเดียว",
+        description: "ดูยอดที่ต้องโอนและสแกนจ่ายได้สะดวก",
+      },
+    ];
+
+    return (
+      <SafeAreaView style={s.safe}>
+        <StatusBar barStyle="dark-content" />
+        <AmbientBackground />
+        {noticeSheet()}
+        <View style={s.onboardingScreen}>
+          <TouchableOpacity
+            style={s.onboardingSkip}
+            onPress={finishOnboarding}
+            accessibilityRole="button"
+            accessibilityLabel="ข้ามการแนะนำ"
+          >
+            <Text style={s.onboardingSkipText}>ข้าม</Text>
+          </TouchableOpacity>
+
+          <ScrollView
+            ref={onboardingScrollRef}
+            horizontal
+            pagingEnabled
+            bounces={false}
+            showsHorizontalScrollIndicator={false}
+            onMomentumScrollEnd={(event) => {
+              const nextPage = Math.round(event.nativeEvent.contentOffset.x / windowWidth);
+              setOnboardingPage(Math.max(0, Math.min(nextPage, slides.length - 1)));
+            }}
+          >
+            {slides.map((slide) => (
+              <View key={slide.title} style={[s.onboardingSlide, { width: windowWidth }]}>
+                <View style={s.onboardingIconCircle}>
+                  <Ionicons name={slide.icon} size={34} color={C.pinkDark} />
+                </View>
+                <Duck style={s.onboardingDuck} />
+                <Text style={s.onboardingTitle}>{slide.title}</Text>
+                <Text style={s.onboardingDescription}>{slide.description}</Text>
+              </View>
+            ))}
+          </ScrollView>
+
+          <View style={s.onboardingFooter}>
+            <View style={s.onboardingPagination}>
+              {slides.map((slide, index) => (
+                <View
+                  key={slide.title}
+                  style={[
+                    s.onboardingDot,
+                    onboardingPage === index && s.onboardingDotActive,
+                  ]}
+                />
+              ))}
+            </View>
+            <Button
+              title={onboardingPage === slides.length - 1 ? "เริ่มเลย" : "ถัดไป"}
+              icon={onboardingPage === slides.length - 1 ? "arrow-forward" : undefined}
+              onPress={continueOnboarding}
+            />
+          </View>
+        </View>
+      </SafeAreaView>
     );
   }
 
@@ -3397,7 +3909,8 @@ export default function App() {
                 label="อีเมล"
                 placeholder="example@email.com"
                 value={email}
-                onChangeText={setEmail}
+                onChangeText={handleEmailChange}
+                error={emailError}
                 keyboardType="email-address"
                 icon="mail-outline"
               />
@@ -3430,7 +3943,7 @@ export default function App() {
                   if (error) {
                     showAlert(
                       "ส่งอีเมลไม่สำเร็จ",
-                      error.message
+                      friendlyError(error)
                     );
                   } else {
                     showAlert(
@@ -3528,36 +4041,18 @@ export default function App() {
                 label="เบอร์โทรศัพท์"
                 placeholder="0812345678"
                 value={phone}
-                onChangeText={setPhone}
+                onChangeText={(value) => setPhone(value.replace(/\D/g, "").slice(0, 10))}
                 keyboardType="phone-pad"
+                maxLength={10}
                 icon="call-outline"
               />
-
-              <Text style={s.label}>สกุลเงินที่ต้องการใช้งาน</Text>
-
-              <TouchableOpacity
-                style={s.currencySelect}
-                activeOpacity={0.8}
-                onPress={() =>
-                  setCurrency(
-                    currency === "บาท (THB)"
-                      ? "ดอลลาร์ (USD)"
-                      : "บาท (THB)"
-                  )
-                }
-              >
-                <Ionicons name="globe-outline" size={18} color={C.pink} style={{ marginRight: 10 }} />
-                <Text style={s.currencyText}>
-                  {currency}
-                </Text>
-                <Ionicons name="chevron-down" size={18} color={C.muted} />
-              </TouchableOpacity>
 
               <Input
                 label="อีเมล"
                 placeholder="example@email.com"
                 value={email}
-                onChangeText={setEmail}
+                onChangeText={handleEmailChange}
+                error={emailError}
                 keyboardType="email-address"
                 icon="mail-outline"
               />
@@ -3672,6 +4167,7 @@ export default function App() {
                 placeholder="กรอกรหัสเชิญจากเพื่อน"
                 value={joinCode}
                 onChangeText={setJoinCode}
+                autoCapitalize="characters"
               />
 
               <Button
@@ -3832,11 +4328,11 @@ export default function App() {
                           });
                         }}
                       >
-                        {member.profile?.avatar_url ? (
-                          <Image source={{ uri: member.profile.avatar_url }} style={s.memberAvatarImage} />
-                        ) : (
-                          <Ionicons name="person" size={16} color={C.pinkDark} />
-                        )}
+                        <Avatar
+                          name={memberDisplayName}
+                          uri={member.profile?.avatar_url}
+                          size={40}
+                        />
                       </TouchableOpacity>
 
                       <TouchableOpacity style={{ flex: 1, paddingRight: 8 }} onPress={() => {
@@ -4079,7 +4575,7 @@ export default function App() {
 
   if (screen === "home") {
     const latestTrip = trips[0];
-    const groupSettlement = calculateSettlement(groupExpenses, members);
+    const groupSettlement = calculateSettlement(groupExpenses, members, settlements);
     const owedToYou = groupSettlement.transfers
       .filter((transfer) => transfer.to === userId)
       .reduce((sum, transfer) => sum + transfer.amount, 0);
@@ -4087,15 +4583,8 @@ export default function App() {
       .filter((transfer) => transfer.from === userId)
       .reduce((sum, transfer) => sum + transfer.amount, 0);
     const groupTotal = groupExpenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
-    const settledTotal = groupExpenses
-      .filter((expense) => expense.is_settled)
-      .reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
-    const repaymentProgress = groupTotal > 0 ? Math.min(settledTotal / groupTotal, 1) : 0;
-
-    const remaining = Math.max(
-      totalBudget - totalSpent,
-      0
-    );
+    const paidBack = settlements.reduce((s, p) => s + p.amount, 0);
+    const repaymentProgress = groupTotal > 0 ? Math.min(paidBack / groupTotal, 1) : 0;
 
     return (
       <SafeAreaView style={s.safe}>
@@ -4336,19 +4825,19 @@ export default function App() {
               <View style={s.debtSummaryRow}>
                 <View style={s.debtSummaryItem}>
                   <Text style={s.budgetChipLabel}>เพื่อนค้างเรา</Text>
-                  <Text style={[s.debtAmount, { color: C.green }]}>฿{owedToYou.toLocaleString()}</Text>
+                  <Text style={[s.debtAmount, { color: C.green }]}>{baht(owedToYou)}</Text>
                 </View>
                 <View style={s.budgetChipDivider} />
                 <View style={s.debtSummaryItem}>
                   <Text style={s.budgetChipLabel}>เราค้างเพื่อน</Text>
-                  <Text style={[s.debtAmount, { color: C.pinkDark }]}>฿{youOwe.toLocaleString()}</Text>
+                  <Text style={[s.debtAmount, { color: C.pinkDark }]}>{baht(youOwe)}</Text>
                 </View>
               </View>
               <View style={s.progressTrack}>
                 <View style={[s.progressValue, { width: `${repaymentProgress * 100}%` }]} />
               </View>
               <Text style={s.progressCaption}>
-                เคลียร์แล้ว ฿{settledTotal.toLocaleString()} จาก ฿{groupTotal.toLocaleString()}
+                โอนคืนแล้ว {baht(paidBack)} จากบิลทั้งหมด {baht(groupTotal)}
               </Text>
               {groupSettlement.transfers.filter((transfer) => transfer.to === userId || transfer.from === userId).map((transfer) => {
                 const qrTarget = transfer.from === userId ? transfer.to : userId;
@@ -4361,8 +4850,8 @@ export default function App() {
                     <View style={{ flex: 1 }}>
                       <Text style={s.debtTransferText}>
                         {transfer.from === userId
-                          ? `คุณค้าง ${getMemberName(transfer.to)} ฿${transfer.amount.toLocaleString()}`
-                          : `${getMemberName(transfer.from)} ค้างคุณ ฿${transfer.amount.toLocaleString()}`}
+                          ? `คุณค้าง ${getMemberName(transfer.to)} ${baht(transfer.amount)}`
+                          : `${getMemberName(transfer.from)} ค้างคุณ ${baht(transfer.amount)}`}
                       </Text>
                       <TouchableOpacity
                         onPress={() => setViewingQrModal({
@@ -4435,7 +4924,7 @@ export default function App() {
               <View style={s.budgetHero}>
                 <Text style={s.budgetHeroLabel}>ยอดจ่ายรวมทั้งหมด</Text>
                 <Text style={s.budgetHeroValue}>
-                  ฿{totalSpent.toLocaleString()}
+                  {baht(totalSpent)}
                 </Text>
               </View>
 
@@ -4537,7 +5026,7 @@ export default function App() {
                 activeOpacity={0.75}
                 onPress={() => nav("profile")}
               >
-                <View style={[s.quickIconBox, { backgroundColor: "#F3EFF1" }]}>
+                <View style={[s.quickIconBox, { backgroundColor: C.surface }]}>
                   <Ionicons name="settings-sharp" size={20} color={C.textMuted} />
                 </View>
                 <Text style={s.quickLabel}>
@@ -4619,10 +5108,11 @@ export default function App() {
       (sum, item) => sum + Number(item.amount || 0),
       0
     );
-    const tripBudgetNum = Number(currentTrip?.budget || 0);
-    const tripRemain = Math.max(tripBudgetNum - tripSpent, 0);
-
-    const settlement = calculateSettlement(tripExpenses, members);
+    const settlement = calculateSettlement(
+      tripExpenses,
+      members,
+      settlements.filter((p) => p.trip_id === currentTrip?.id)
+    );
 
     return (
       <SafeAreaView style={s.safe}>
@@ -4675,7 +5165,7 @@ export default function App() {
                 <View>
                   <Text style={s.tripHeroBudgetLabel}>ค่าใช้จ่ายทั้งหมดในทริป</Text>
                   <Text style={s.tripHeroSpentText}>
-                    ฿{tripSpent.toLocaleString()}
+                    {baht(tripSpent)}
                   </Text>
                 </View>
                 <View style={s.tripHeroBadge}>
@@ -4708,7 +5198,7 @@ export default function App() {
                 <View style={s.tripHeroStat}>
                   <Text style={s.tripHeroStatLabel}>เฉลี่ยต่อคน</Text>
                   <Text style={[s.tripHeroStatValue, { color: C.pinkDark }]}>
-                    ฿{Math.round(tripSpent / Math.max(members.length, 1)).toLocaleString()}
+                    {baht(Math.round(tripSpent / Math.max(members.length, 1)))}
                   </Text>
                 </View>
               </View>
@@ -4774,7 +5264,7 @@ export default function App() {
                         marginTop: 10,
                         color: C.muted,
                         fontFamily: "Prompt_400Regular",
-                        fontSize: 12,
+                        fontSize: 13,
                       }}
                     >
                       กำลังโหลดรายการค่าใช้จ่าย...
@@ -4821,34 +5311,28 @@ export default function App() {
                             <Ionicons
                               name={isItemized ? "restaurant-outline" : "wallet-outline"}
                               size={18}
-                              color={isItemized ? "#D97706" : C.pinkDark}
+                              color={isItemized ? C.amber : C.pinkDark}
                             />
                           </View>
 
                           <View style={{ flex: 1, paddingHorizontal: 10 }}>
                             <Text style={s.expenseItemTitle}>{exp.title}</Text>
                             <Text style={s.expenseDate}>
-                              {exp.is_settled ? "เคลียร์ยอดแล้ว" : "ยังไม่เคลียร์ยอด"}
+                              {new Date(exp.created_at).toLocaleDateString("th-TH", { day: "numeric", month: "short" }) + (exp.is_settled ? " • เคลียร์แล้ว" : "")}
                             </Text>
                           </View>
 
                           <View style={{ alignItems: "flex-end" }}>
                             <Text style={s.expenseItemAmount}>
-                              ฿{Number(exp.amount).toLocaleString()}
+                              {baht(exp.amount)}
                             </Text>
-                            {!exp.is_settled && (
-                              <TouchableOpacity onPress={() => settleExpense(exp)} style={s.settleBillButton}>
-                                <Ionicons name="checkmark-circle-outline" size={13} color={C.green} />
-                                <Text style={s.settleBillText}>เคลียร์บิล</Text>
-                              </TouchableOpacity>
-                            )}
                             <TouchableOpacity
                               onPress={() => deleteExpense(exp.id, exp.title)}
                               hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
                               style={s.deleteExpenseBtn}
                               activeOpacity={0.7}
                             >
-                              <Ionicons name="trash-outline" size={13} color="#DC2626" />
+                              <Ionicons name="trash-outline" size={13} color={C.red} />
                               <Text style={s.deleteExpenseBtnText}>ลบ</Text>
                             </TouchableOpacity>
                           </View>
@@ -4866,7 +5350,7 @@ export default function App() {
 
                           {isItemized ? (
                             <View style={s.expenseItemizedBadge}>
-                              <Ionicons name="restaurant" size={12} color="#D97706" />
+                              <Ionicons name="restaurant" size={12} color={C.amber} />
                               <Text style={s.expenseItemizedBadgeText}>
                                 แยกตามเมนู ({exp.items.length} รายการ)
                               </Text>
@@ -4875,7 +5359,7 @@ export default function App() {
                             <View style={s.expenseShareBadge}>
                               <Ionicons name="people-outline" size={13} color={C.blue} />
                               <Text style={s.expenseShareText}>
-                                หาร {pList.length} คน (คนละ ฿{perPerson.toLocaleString()})
+                                หาร {pList.length} คน (คนละ {baht(perPerson)})
                               </Text>
                             </View>
                           )}
@@ -4938,10 +5422,10 @@ export default function App() {
                                       </View>
                                       <View style={{ alignItems: "flex-end" }}>
                                         <Text style={s.subItemAccordionPrice}>
-                                          ฿{itPrice.toLocaleString()}
+                                          {baht(itPrice)}
                                         </Text>
                                         <Text style={s.subItemAccordionShare}>
-                                          หาร {itParts.length} คน (ละ ฿{Math.round(itShare * 100) / 100})
+                                          หาร {itParts.length} คน (ละ {baht(Math.round(itShare * 100) / 100)})
                                         </Text>
                                       </View>
                                     </View>
@@ -4968,10 +5452,10 @@ export default function App() {
                   </View>
                   <View style={{ flex: 1, marginLeft: 10 }}>
                     <Text style={s.algoBannerTitle}>
-                      คำนวณแบบ Minimum Transfers
+                      ลดจำนวนครั้งที่ต้องโอน
                     </Text>
                     <Text style={s.algoBannerDesc}>
-                      ระบบหักลบหนี้สินแบบรวมศูนย์ เพื่อให้โอนเงินหากันน้อยครั้งที่สุด
+                      ระบบหักลบหนี้ในกลุ่มให้เหลือการโอนน้อยครั้งที่สุดเท่าที่เป็นไปได้
                     </Text>
                   </View>
                 </View>
@@ -4997,13 +5481,13 @@ export default function App() {
                           style={s.copySummaryBtn}
                           activeOpacity={0.8}
                           onPress={() => {
-                            let text = `📋 สรุปเคลียร์เงินทริป: ${currentTrip?.title || "ทริป"}\nยอดรวมค่าใช้จ่าย: ฿${tripSpent.toLocaleString()}\n--------------------------------\n`;
+                            let text = `📋 สรุปเคลียร์เงินทริป: ${currentTrip?.title || "ทริป"}\nยอดรวมค่าใช้จ่าย: ${baht(tripSpent)}\n--------------------------------\n`;
                             settlement.transfers.forEach((tr, idx) => {
                               const fromName = getMemberName(tr.from);
                               const toName = getMemberName(tr.to);
-                              text += `${idx + 1}. ${fromName} ➔ โอนให้ ${toName}: ฿${tr.amount.toLocaleString()}\n`;
+                              text += `${idx + 1}. ${fromName} ➔ โอนให้ ${toName}: ${baht(tr.amount)}\n`;
                             });
-                            text += `--------------------------------\n*โอนน้อยที่สุดเพียง ${settlement.transfers.length} ครั้ง ✨`;
+                            text += `--------------------------------\n*รวมโอนเพียง ${settlement.transfers.length} ครั้ง ✨`;
                             showAlert("สรุปยอดเคลียร์เงิน", text);
                           }}
                         >
@@ -5054,9 +5538,11 @@ export default function App() {
                         >
                           <View style={s.transferPartyRow}>
                             <View style={s.transferParty}>
-                              <View style={[s.transferAvatar, { backgroundColor: C.orangeLight }]}>
-                                <Ionicons name="person" size={16} color={C.orange} />
-                              </View>
+                              <Avatar
+                                name={fromName}
+                                uri={members.find((member) => member.user_id === tr.from)?.profile?.avatar_url}
+                                size={34}
+                              />
                               <Text style={s.transferPartyName} numberOfLines={1}>
                                 {fromName}
                               </Text>
@@ -5065,10 +5551,7 @@ export default function App() {
 
                             <View style={s.transferMiddle}>
                               <Text style={s.transferAmount}>
-                                ฿{tr.amount.toLocaleString(undefined, {
-                                  minimumFractionDigits: 2,
-                                  maximumFractionDigits: 2,
-                                })}
+                                {baht(tr.amount)}
                               </Text>
                               <View style={s.transferArrowWrap}>
                                 <View style={s.transferArrowLine} />
@@ -5078,9 +5561,11 @@ export default function App() {
                             </View>
 
                             <View style={s.transferParty}>
-                              <View style={[s.transferAvatar, { backgroundColor: C.greenLight }]}>
-                                <Ionicons name="person" size={16} color={C.green} />
-                              </View>
+                              <Avatar
+                                name={toName}
+                                uri={members.find((member) => member.user_id === tr.to)?.profile?.avatar_url}
+                                size={34}
+                              />
                               <Text style={s.transferPartyName} numberOfLines={1}>
                                 {toName}
                               </Text>
@@ -5124,6 +5609,15 @@ export default function App() {
                             </View>
                           </TouchableOpacity>
 
+                          {(tr.from === userId || tr.to === userId) && (
+                            <TouchableOpacity
+                              style={[s.settleTransferButton, { marginLeft: 0, marginTop: 8, width: "100%", alignItems: "center" }]}
+                              onPress={() => settleTransfer(tr, currentTrip.id)}
+                            >
+                              <Text style={s.settleTransferText}>บันทึกว่าโอนแล้ว</Text>
+                            </TouchableOpacity>
+                          )}
+
                           {!receiverQr?.promptpay && !receiverQr?.qrUri && tr.to === userId && (
                             <TouchableOpacity
                               style={{ marginTop: 6, alignSelf: "center", paddingVertical: 2 }}
@@ -5159,55 +5653,59 @@ export default function App() {
 
                     return (
                       <View key={mId} style={s.breakdownRow}>
-                        <View style={s.breakdownAvatar}>
-                          <Ionicons name="person" size={16} color={C.pinkDark} />
-                        </View>
+                        <Avatar
+                          name={mName}
+                          uri={member.profile?.avatar_url}
+                          size={36}
+                        />
 
                         <View style={{ flex: 1, paddingHorizontal: 10 }}>
                           <Text style={s.breakdownName}>
                             {mName}
                           </Text>
                           <Text style={s.breakdownSub}>
-                            ออกไป ฿{paid.toLocaleString()} • ยอดหาร ฿{owed.toLocaleString()}
+                            ออกไป {baht(paid)} • ยอดหาร {baht(owed)}
                           </Text>
                         </View>
 
                         {/* QR QUICK BUTTON FOR MEMBER */}
-                        <TouchableOpacity
-                          style={s.breakdownQrBtn}
-                          activeOpacity={0.7}
-                          onPress={() => {
-                            setViewingQrModal({
-                              userId: mId,
-                              name: mName,
-                              amount: roundedNet > 0.01 ? roundedNet : 0,
-                              promptpay: mQr?.promptpay || "",
-                              bankName: mQr?.bankName || "",
-                              accountName: mQr?.accountName || "",
-                              qrUri: mQr?.qrUri || mQr?.uri || mQr?.base64 || mQr?.qr || "",
-                            });
-                          }}
-                        >
-                          <Ionicons name="qr-code-outline" size={15} color={C.pinkDark} />
-                        </TouchableOpacity>
+                        {roundedNet > 0.01 && (
+                          <TouchableOpacity
+                            style={s.breakdownQrBtn}
+                            activeOpacity={0.7}
+                            onPress={() => {
+                              setViewingQrModal({
+                                userId: mId,
+                                name: mName,
+                                amount: roundedNet,
+                                promptpay: mQr?.promptpay || "",
+                                bankName: mQr?.bankName || "",
+                                accountName: mQr?.accountName || "",
+                                qrUri: mQr?.qrUri || mQr?.uri || mQr?.base64 || mQr?.qr || "",
+                              });
+                            }}
+                          >
+                            <Ionicons name="qr-code-outline" size={15} color={C.pinkDark} />
+                          </TouchableOpacity>
+                        )}
 
                         <View style={{ alignItems: "flex-end" }}>
                           {roundedNet > 0.01 ? (
                             <View style={s.badgeNetPositive}>
                               <Text style={s.badgeNetPositiveText}>
-                                + ได้รับ ฿{roundedNet.toLocaleString()}
+                                + ได้รับ {baht(roundedNet)}
                               </Text>
                             </View>
                           ) : roundedNet < -0.01 ? (
                             <View style={s.badgeNetNegative}>
                               <Text style={s.badgeNetNegativeText}>
-                                - ต้องโอน ฿{Math.abs(roundedNet).toLocaleString()}
+                                - ต้องโอน {baht(Math.abs(roundedNet))}
                               </Text>
                             </View>
                           ) : (
                             <View style={s.badgeNetZero}>
                               <Text style={s.badgeNetZeroText}>
-                                พอดี ฿0
+                                พอดี {baht(0)}
                               </Text>
                             </View>
                           )}
@@ -5278,7 +5776,7 @@ export default function App() {
               </Text>
 
               <View style={s.profileBadge}>
-                <Ionicons name="sparkles" size={11} color="#D97706" style={{ marginRight: 4 }} />
+                <Ionicons name="sparkles" size={11} color={C.amber} style={{ marginRight: 4 }} />
                 <Text style={s.profileBadgeText}>TRIP EXPLORER</Text>
               </View>
 
@@ -5387,8 +5885,8 @@ export default function App() {
                         activeOpacity={0.8}
                         onPress={() => removeQrData(userId)}
                       >
-                        <Ionicons name="trash-outline" size={13} color="#DC2626" />
-                        <Text style={[s.userQrActionText, { color: "#DC2626" }]}>ลบ</Text>
+                        <Ionicons name="trash-outline" size={13} color={C.red} />
+                        <Text style={[s.userQrActionText, { color: C.red }]}>ลบ</Text>
                       </TouchableOpacity>
                     </View>
                   </View>
@@ -5447,28 +5945,6 @@ export default function App() {
                 <Ionicons name="chevron-forward" size={18} color={C.muted} />
               </TouchableOpacity>
 
-              <View style={s.divider} />
-
-              <TouchableOpacity
-                style={s.settingRow}
-                activeOpacity={0.7}
-                onPress={() =>
-                  showAlert(
-                    "สกุลเงินที่ใช้",
-                    `สกุลเงินหลักปัจจุบันของคุณคือ ${currency}`
-                  )
-                }
-              >
-                <View style={[s.settingIconBox, { backgroundColor: C.greenLight }]}>
-                  <Ionicons name="cash-outline" size={18} color={C.green} />
-                </View>
-
-                <Text style={s.settingText}>
-                  สกุลเงิน ({currency})
-                </Text>
-
-                <Ionicons name="chevron-forward" size={18} color={C.muted} />
-              </TouchableOpacity>
             </View>
 
             <Button
@@ -5485,7 +5961,14 @@ export default function App() {
                   <View style={s.sheetHandle} />
                   <Text style={s.modalTitle}>แก้ไขข้อมูลส่วนตัว</Text>
                   <Input label="ชื่อ - นามสกุล" value={name} onChangeText={setName} icon="person-outline" />
-                  <Input label="เบอร์โทรศัพท์" value={phone} onChangeText={setPhone} keyboardType="phone-pad" icon="call-outline" />
+                  <Input
+                    label="เบอร์โทรศัพท์"
+                    value={phone}
+                    onChangeText={(value) => setPhone(value.replace(/\D/g, "").slice(0, 10))}
+                    keyboardType="phone-pad"
+                    maxLength={10}
+                    icon="call-outline"
+                  />
                   <Button title={busy ? "กำลังบันทึก..." : "บันทึกโปรไฟล์"} onPress={saveProfileData} disabled={busy} />
                   <Button title="ยกเลิก" outline onPress={() => setProfileModal(false)} style={{ marginTop: 8 }} />
                 </View>
@@ -5556,7 +6039,7 @@ const s = StyleSheet.create({
   brandTagline: {
     fontFamily: "Prompt_400Regular",
     color: C.textMuted,
-    fontSize: 12,
+    fontSize: 13,
     marginTop: 3,
     letterSpacing: 0.2,
   },
@@ -5602,7 +6085,7 @@ const s = StyleSheet.create({
 
   label: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.text,
     marginBottom: 7,
     marginLeft: 3,
@@ -5610,7 +6093,7 @@ const s = StyleSheet.create({
 
   inputContainer: {
     minHeight: 50,
-    borderRadius: 15,
+    borderRadius: R.md,
     borderWidth: 0,
     backgroundColor: "#F3EAE3",
     flexDirection: "row",
@@ -5634,6 +6117,15 @@ const s = StyleSheet.create({
     paddingVertical: 10,
   },
 
+  inputErrorText: {
+    fontFamily: "Prompt_400Regular",
+    color: C.red,
+    fontSize: 13,
+    lineHeight: 20,
+    marginTop: 3,
+    marginLeft: 4,
+  },
+
   header: {
     minHeight: 48,
     flexDirection: "row",
@@ -5645,7 +6137,7 @@ const s = StyleSheet.create({
   backButton: {
     width: 40,
     height: 40,
-    borderRadius: 20,
+    borderRadius: R.md,
     backgroundColor: C.white,
     borderWidth: 1,
     borderColor: C.border,
@@ -5657,11 +6149,6 @@ const s = StyleSheet.create({
     shadowRadius: 3,
   },
 
-  backText: {
-    fontSize: 22,
-    color: C.text,
-  },
-
   headerTitle: {
     fontFamily: "Prompt_600SemiBold",
     fontSize: 16,
@@ -5670,6 +6157,89 @@ const s = StyleSheet.create({
   },
 
   // LANDING
+
+  onboardingScreen: {
+    flex: 1,
+  },
+
+  onboardingSkip: {
+    minHeight: 44,
+    alignSelf: "flex-end",
+    justifyContent: "center",
+    paddingHorizontal: 20,
+  },
+
+  onboardingSkipText: {
+    color: C.textMuted,
+    fontFamily: "Prompt_500Medium",
+    fontSize: 13,
+  },
+
+  onboardingSlide: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 28,
+    paddingBottom: 20,
+  },
+
+  onboardingIconCircle: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C.pinkLight,
+    marginBottom: 8,
+  },
+
+  onboardingDuck: {
+    width: 150,
+    height: 150,
+    marginBottom: 12,
+  },
+
+  onboardingTitle: {
+    fontFamily: "Prompt_700Bold",
+    color: C.text,
+    fontSize: 21,
+    lineHeight: 34,
+    textAlign: "center",
+  },
+
+  onboardingDescription: {
+    fontFamily: "Prompt_400Regular",
+    color: C.textMuted,
+    fontSize: 13,
+    lineHeight: 22,
+    textAlign: "center",
+    marginTop: 6,
+  },
+
+  onboardingFooter: {
+    paddingHorizontal: 22,
+    paddingBottom: 18,
+  },
+
+  onboardingPagination: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 18,
+  },
+
+  onboardingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: C.border,
+    marginHorizontal: 4,
+  },
+
+  onboardingDotActive: {
+    width: 24,
+    backgroundColor: C.pinkDark,
+  },
 
   landing: {
     flex: 1,
@@ -5695,13 +6265,13 @@ const s = StyleSheet.create({
     backgroundColor: C.pinkLight,
     paddingHorizontal: 12,
     paddingVertical: 5,
-    borderRadius: 20,
+    borderRadius: R.md,
     marginBottom: 10,
   },
 
   luxuryBadgeText: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 10,
+    fontSize: 11,
     color: C.pinkDark,
     marginLeft: 5,
     letterSpacing: 0.8,
@@ -5783,7 +6353,7 @@ const s = StyleSheet.create({
     borderColor: C.border,
     paddingHorizontal: 10,
     paddingVertical: 5,
-    borderRadius: 16,
+    borderRadius: R.md,
     marginHorizontal: 3,
   },
 
@@ -5849,7 +6419,7 @@ const s = StyleSheet.create({
   subtitle: {
     fontFamily: "Prompt_400Regular",
     color: C.textMuted,
-    fontSize: 12,
+    fontSize: 13,
     marginTop: 4,
     lineHeight: 20,
     textAlign: "center",
@@ -5857,7 +6427,7 @@ const s = StyleSheet.create({
 
   formCard: {
     backgroundColor: C.white,
-    borderRadius: 24,
+    borderRadius: R.lg,
     padding: 18,
     borderWidth: 1,
     borderColor: C.border,
@@ -5877,47 +6447,6 @@ const s = StyleSheet.create({
   link: {
     fontFamily: "Prompt_600SemiBold",
     color: C.pinkDark,
-    fontSize: 12,
-  },
-
-  orRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginVertical: 18,
-  },
-
-  line: {
-    height: 1,
-    flex: 1,
-    backgroundColor: C.border,
-  },
-
-  orText: {
-    fontFamily: "Prompt_400Regular",
-    color: C.muted,
-    fontSize: 12,
-    marginHorizontal: 12,
-  },
-
-  social: {
-    minHeight: 50,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: C.border,
-    backgroundColor: C.white,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    shadowColor: C.shadow,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.6,
-    shadowRadius: 4,
-    elevation: 1,
-  },
-
-  socialText: {
-    fontFamily: "Prompt_500Medium",
-    color: C.text,
     fontSize: 13,
   },
 
@@ -5931,7 +6460,7 @@ const s = StyleSheet.create({
   muted: {
     fontFamily: "Prompt_400Regular",
     color: C.muted,
-    fontSize: 12,
+    fontSize: 13,
   },
 
   // REGISTER
@@ -5956,7 +6485,7 @@ const s = StyleSheet.create({
     fontFamily: "Prompt_400Regular",
     color: C.textMuted,
     textAlign: "center",
-    fontSize: 12,
+    fontSize: 13,
     marginTop: 4,
   },
 
@@ -5988,7 +6517,7 @@ const s = StyleSheet.create({
 
   setupFormCard: {
     backgroundColor: C.white,
-    borderRadius: 24,
+    borderRadius: R.lg,
     padding: 18,
     borderWidth: 1,
     borderColor: C.border,
@@ -5997,30 +6526,6 @@ const s = StyleSheet.create({
     shadowOpacity: 1,
     shadowRadius: 12,
     elevation: 2,
-  },
-
-  currencySelect: {
-    minHeight: 50,
-    borderRadius: 15,
-    borderWidth: 1,
-    borderColor: C.border,
-    backgroundColor: C.white,
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 14,
-    marginBottom: 14,
-    shadowColor: C.shadow,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.6,
-    shadowRadius: 4,
-    elevation: 1,
-  },
-
-  currencyText: {
-    fontFamily: "Prompt_500Medium",
-    flex: 1,
-    fontSize: 13,
-    color: C.text,
   },
 
   // APP / HOME
@@ -6045,7 +6550,7 @@ const s = StyleSheet.create({
   homeAvatar: {
     width: 48,
     height: 48,
-    borderRadius: 24,
+    borderRadius: R.lg,
     backgroundColor: C.pinkLight,
     overflow: "hidden",
     marginRight: 12,
@@ -6084,7 +6589,7 @@ const s = StyleSheet.create({
   notification: {
     width: 42,
     height: 42,
-    borderRadius: 21,
+    borderRadius: R.lg,
     backgroundColor: C.white,
     borderWidth: 1,
     borderColor: C.border,
@@ -6109,7 +6614,7 @@ const s = StyleSheet.create({
   tripBanner: {
     minHeight: 140,
     backgroundColor: C.pink,
-    borderRadius: 24,
+    borderRadius: R.lg,
     padding: 20,
     overflow: "hidden",
     marginBottom: 20,
@@ -6134,14 +6639,14 @@ const s = StyleSheet.create({
     alignSelf: "flex-start",
     paddingHorizontal: 9,
     paddingVertical: 3,
-    borderRadius: 12,
+    borderRadius: R.sm,
     marginBottom: 8,
   },
 
   bannerTagText: {
     fontFamily: "Prompt_600SemiBold",
     color: C.white,
-    fontSize: 10,
+    fontSize: 11,
     marginLeft: 4,
     letterSpacing: 0.6,
   },
@@ -6156,7 +6661,7 @@ const s = StyleSheet.create({
   bannerSubtitle: {
     fontFamily: "Prompt_400Regular",
     color: "rgba(255,255,255,0.92)",
-    fontSize: 12,
+    fontSize: 13,
     marginTop: 3,
   },
 
@@ -6165,7 +6670,7 @@ const s = StyleSheet.create({
     backgroundColor: C.white,
     paddingHorizontal: 16,
     paddingVertical: 8,
-    borderRadius: 20,
+    borderRadius: R.md,
     alignSelf: "flex-start",
     flexDirection: "row",
     alignItems: "center",
@@ -6178,7 +6683,7 @@ const s = StyleSheet.create({
   createButtonText: {
     fontFamily: "Prompt_600SemiBold",
     color: C.pinkDark,
-    fontSize: 12,
+    fontSize: 13,
   },
 
   bannerFlightBadge: {
@@ -6209,14 +6714,14 @@ const s = StyleSheet.create({
   seeAll: {
     fontFamily: "Prompt_600SemiBold",
     color: C.pinkDark,
-    fontSize: 12,
+    fontSize: 13,
   },
 
   // GROUPS
 
   groupActionCard: {
     backgroundColor: C.white,
-    borderRadius: 22,
+    borderRadius: R.lg,
     borderWidth: 1,
     borderColor: C.border,
     padding: 18,
@@ -6239,12 +6744,12 @@ const s = StyleSheet.create({
     backgroundColor: C.pinkLight,
     paddingHorizontal: 10,
     paddingVertical: 4,
-    borderRadius: 12,
+    borderRadius: R.sm,
   },
 
   groupStatusTagText: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 10,
+    fontSize: 11,
     color: C.pinkDark,
   },
 
@@ -6256,14 +6761,14 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderStyle: "dashed",
     borderColor: C.pink,
-    borderRadius: 16,
+    borderRadius: R.md,
     padding: 12,
     marginVertical: 10,
   },
 
   inviteCodeLabel: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 10,
+    fontSize: 11,
     color: C.textMuted,
   },
 
@@ -6283,7 +6788,7 @@ const s = StyleSheet.create({
     borderColor: C.border,
     paddingHorizontal: 12,
     paddingVertical: 6,
-    borderRadius: 14,
+    borderRadius: R.md,
   },
 
   copyButtonText: {
@@ -6305,34 +6810,13 @@ const s = StyleSheet.create({
     backgroundColor: C.pinkLight,
     paddingHorizontal: 8,
     paddingVertical: 2,
-    borderRadius: 10,
+    borderRadius: R.sm,
   },
 
   memberCountBadgeText: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 10,
+    fontSize: 11,
     color: C.pinkDark,
-  },
-
-  roleBadge: {
-    backgroundColor: C.pinkLight,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
-  },
-
-  roleBadgeOwner: {
-    backgroundColor: "#FEF3C7",
-  },
-
-  roleBadgeText: {
-    fontFamily: "Prompt_500Medium",
-    fontSize: 10,
-    color: C.pinkDark,
-  },
-
-  roleBadgeTextOwner: {
-    color: "#D97706",
   },
 
   groupCardTitle: {
@@ -6345,14 +6829,14 @@ const s = StyleSheet.create({
   groupCardDesc: {
     fontFamily: "Prompt_400Regular",
     color: C.textMuted,
-    fontSize: 12,
+    fontSize: 13,
     marginTop: 3,
     marginBottom: 14,
   },
 
   groupItem: {
     minHeight: 72,
-    borderRadius: 18,
+    borderRadius: R.md,
     backgroundColor: C.white,
     borderWidth: 1,
     borderColor: C.border,
@@ -6376,7 +6860,7 @@ const s = StyleSheet.create({
   groupIcon: {
     width: 44,
     height: 44,
-    borderRadius: 14,
+    borderRadius: R.md,
     backgroundColor: C.pinkLight,
     justifyContent: "center",
     alignItems: "center",
@@ -6405,9 +6889,9 @@ const s = StyleSheet.create({
   },
 
   memberAvatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: C.pinkLight,
     justifyContent: "center",
     alignItems: "center",
@@ -6422,7 +6906,7 @@ const s = StyleSheet.create({
 
   activeGroupCard: {
     minHeight: 70,
-    borderRadius: 20,
+    borderRadius: R.md,
     backgroundColor: C.white,
     borderWidth: 1,
     borderColor: C.border,
@@ -6445,7 +6929,7 @@ const s = StyleSheet.create({
 
   tripCard: {
     minHeight: 96,
-    borderRadius: 20,
+    borderRadius: R.md,
     backgroundColor: C.white,
     borderWidth: 1,
     borderColor: C.border,
@@ -6463,7 +6947,7 @@ const s = StyleSheet.create({
   tripPhoto: {
     width: 68,
     height: 68,
-    borderRadius: 16,
+    borderRadius: R.md,
     backgroundColor: C.blueLight,
     alignItems: "center",
     justifyContent: "center",
@@ -6495,13 +6979,13 @@ const s = StyleSheet.create({
     backgroundColor: C.pinkLight,
     paddingHorizontal: 8,
     paddingVertical: 3,
-    borderRadius: 12,
+    borderRadius: R.sm,
   },
 
   destinationText: {
     fontFamily: "Prompt_500Medium",
     color: C.pinkDark,
-    fontSize: 10,
+    fontSize: 11,
     marginLeft: 3,
   },
 
@@ -6525,7 +7009,7 @@ const s = StyleSheet.create({
 
   emptyTrip: {
     backgroundColor: C.white,
-    borderRadius: 20,
+    borderRadius: R.md,
     borderWidth: 1,
     borderColor: C.border,
     alignItems: "center",
@@ -6541,7 +7025,7 @@ const s = StyleSheet.create({
   emptyIconCircle: {
     width: 52,
     height: 52,
-    borderRadius: 26,
+    borderRadius: R.lg,
     backgroundColor: C.pinkLight,
     alignItems: "center",
     justifyContent: "center",
@@ -6567,7 +7051,7 @@ const s = StyleSheet.create({
 
   budgetCard: {
     backgroundColor: "rgba(255,255,255,0.94)",
-    borderRadius: 28,
+    borderRadius: R.lg,
     borderWidth: 1,
     borderColor: C.border,
     padding: 18,
@@ -6602,13 +7086,13 @@ const s = StyleSheet.create({
     backgroundColor: C.pinkLight,
     paddingHorizontal: 8,
     paddingVertical: 3,
-    borderRadius: 10,
+    borderRadius: R.sm,
   },
 
   currencyPillText: {
     fontFamily: "Prompt_600SemiBold",
     color: C.pinkDark,
-    fontSize: 10,
+    fontSize: 11,
   },
 
   budgetHero: {
@@ -6667,13 +7151,13 @@ const s = StyleSheet.create({
   budgetChipLabel: {
     fontFamily: "Prompt_400Regular",
     color: C.muted,
-    fontSize: 10,
+    fontSize: 11,
   },
 
   budgetChipValue: {
     fontFamily: "Prompt_600SemiBold",
     color: C.text,
-    fontSize: 12,
+    fontSize: 13,
     marginTop: 1,
   },
 
@@ -6695,7 +7179,7 @@ const s = StyleSheet.create({
   quickItem: {
     width: "23%",
     minHeight: 88,
-    borderRadius: 20,
+    borderRadius: R.md,
     backgroundColor: C.white,
     borderWidth: 1,
     borderColor: C.border,
@@ -6712,7 +7196,7 @@ const s = StyleSheet.create({
   quickIconBox: {
     width: 40,
     height: 40,
-    borderRadius: 14,
+    borderRadius: R.md,
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 6,
@@ -6749,7 +7233,7 @@ const s = StyleSheet.create({
   profileCard: {
     alignItems: "center",
     backgroundColor: C.white,
-    borderRadius: 24,
+    borderRadius: R.lg,
     borderWidth: 1,
     borderColor: C.border,
     padding: 22,
@@ -6792,7 +7276,7 @@ const s = StyleSheet.create({
     right: 2,
     width: 22,
     height: 22,
-    borderRadius: 11,
+    borderRadius: R.sm,
     backgroundColor: C.green,
     alignItems: "center",
     justifyContent: "center",
@@ -6810,18 +7294,18 @@ const s = StyleSheet.create({
   profileBadge: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#FEF3C7",
+    backgroundColor: C.amberLight,
     paddingHorizontal: 10,
     paddingVertical: 4,
-    borderRadius: 12,
+    borderRadius: R.sm,
     marginTop: 6,
     marginBottom: 12,
   },
 
   profileBadgeText: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 10,
-    color: "#D97706",
+    fontSize: 11,
+    color: C.amber,
     letterSpacing: 0.6,
   },
 
@@ -6841,20 +7325,20 @@ const s = StyleSheet.create({
   profileEmail: {
     fontFamily: "Prompt_400Regular",
     color: C.textMuted,
-    fontSize: 12,
+    fontSize: 13,
   },
 
   profilePhone: {
     fontFamily: "Prompt_400Regular",
     color: C.textMuted,
-    fontSize: 12,
+    fontSize: 13,
   },
 
   settingsCard: {
     backgroundColor: C.white,
     borderWidth: 1,
     borderColor: C.border,
-    borderRadius: 20,
+    borderRadius: R.md,
     paddingHorizontal: 16,
     paddingVertical: 6,
     marginTop: 18,
@@ -6874,7 +7358,7 @@ const s = StyleSheet.create({
   settingIconBox: {
     width: 34,
     height: 34,
-    borderRadius: 10,
+    borderRadius: R.sm,
     alignItems: "center",
     justifyContent: "center",
     marginRight: 12,
@@ -6907,7 +7391,7 @@ const s = StyleSheet.create({
     width: "100%",
     maxWidth: 430,
     backgroundColor: C.white,
-    borderRadius: 28,
+    borderRadius: R.lg,
     padding: 24,
     shadowColor: "rgba(0,0,0,0.2)",
     shadowOffset: { width: 0, height: 10 },
@@ -6924,10 +7408,54 @@ const s = StyleSheet.create({
     letterSpacing: -0.3,
   },
 
+  expenseAmountHero: {
+    minHeight: 76,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 4,
+    marginBottom: 2,
+  },
+
+  expenseAmountCurrency: {
+    fontFamily: "Prompt_600SemiBold",
+    color: C.pinkDark,
+    fontSize: 22,
+    lineHeight: 34,
+    marginRight: 4,
+  },
+
+  expenseAmountInput: {
+    minWidth: 150,
+    maxWidth: "82%",
+    color: C.pinkDark,
+    fontFamily: "Prompt_700Bold",
+    fontSize: 40,
+    lineHeight: 56,
+    paddingVertical: 0,
+    textAlign: "center",
+  },
+
+  expenseAmountValue: {
+    color: C.pinkDark,
+    fontFamily: "Prompt_700Bold",
+    fontSize: 40,
+    lineHeight: 56,
+    textAlign: "center",
+  },
+
+  expenseAmountCaption: {
+    color: C.textMuted,
+    fontFamily: "Prompt_500Medium",
+    fontSize: 13,
+    textAlign: "center",
+    marginBottom: 8,
+  },
+
   modalSubtitle: {
     fontFamily: "Prompt_400Regular",
     color: C.textMuted,
-    fontSize: 12,
+    fontSize: 13,
     textAlign: "center",
     marginTop: 4,
     marginBottom: 18,
@@ -6960,7 +7488,7 @@ const s = StyleSheet.create({
   navLabel: {
     fontFamily: "Prompt_500Medium",
     color: C.muted,
-    fontSize: 10,
+    fontSize: 11,
     marginTop: 2,
   },
 
@@ -6974,7 +7502,7 @@ const s = StyleSheet.create({
     height: 28,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 14,
+    borderRadius: R.md,
   },
 
   navIconWrapperActive: {
@@ -7011,7 +7539,7 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: C.white,
-    borderRadius: 18,
+    borderRadius: R.md,
     padding: 14,
     marginBottom: 8,
     borderWidth: 1,
@@ -7026,7 +7554,7 @@ const s = StyleSheet.create({
   otherTripIcon: {
     width: 36,
     height: 36,
-    borderRadius: 12,
+    borderRadius: R.sm,
     backgroundColor: C.pinkLight,
     alignItems: "center",
     justifyContent: "center",
@@ -7052,12 +7580,47 @@ const s = StyleSheet.create({
     marginBottom: 6,
   },
 
+  categoryPicker: {
+    marginTop: 2,
+    marginBottom: 12,
+  },
+
+  categoryPickerContent: {
+    alignItems: "center",
+    paddingRight: 4,
+  },
+
+  categoryChip: {
+    minHeight: 38,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginRight: 8,
+    borderWidth: 1,
+    borderRadius: 999,
+  },
+
+  categoryChipText: {
+    fontFamily: "Prompt_500Medium",
+    fontSize: 13,
+    marginLeft: 6,
+  },
+
+  expenseError: {
+    fontFamily: "Prompt_500Medium",
+    fontSize: 13,
+    lineHeight: 21,
+    color: C.red,
+    marginBottom: 10,
+  },
+
   payerChip: {
     flexDirection: "row",
     alignItems: "center",
     paddingVertical: 8,
     paddingHorizontal: 14,
-    borderRadius: 16,
+    borderRadius: R.md,
     backgroundColor: C.pinkBg,
     borderWidth: 1,
     borderColor: C.border,
@@ -7071,7 +7634,7 @@ const s = StyleSheet.create({
 
   payerChipText: {
     fontFamily: "Prompt_500Medium",
-    fontSize: 12,
+    fontSize: 13,
     color: C.text,
   },
 
@@ -7088,7 +7651,7 @@ const s = StyleSheet.create({
 
   selectAllText: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.pinkDark,
   },
 
@@ -7103,7 +7666,7 @@ const s = StyleSheet.create({
     margin: "1%",
     paddingVertical: 9,
     paddingHorizontal: 10,
-    borderRadius: 12,
+    borderRadius: R.sm,
     backgroundColor: C.pinkBg,
     borderWidth: 1,
     borderColor: C.border,
@@ -7118,7 +7681,7 @@ const s = StyleSheet.create({
 
   participantCheckName: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 12,
+    fontSize: 13,
     color: C.text,
     marginLeft: 8,
     flex: 1,
@@ -7131,7 +7694,7 @@ const s = StyleSheet.create({
 
   splitPreviewCard: {
     backgroundColor: C.pinkLight,
-    borderRadius: 14,
+    borderRadius: R.md,
     padding: 12,
     flexDirection: "row",
     alignItems: "center",
@@ -7142,7 +7705,7 @@ const s = StyleSheet.create({
 
   splitPreviewText: {
     fontFamily: "Prompt_500Medium",
-    fontSize: 12,
+    fontSize: 13,
     color: C.text,
     marginLeft: 8,
     flex: 1,
@@ -7184,7 +7747,7 @@ const s = StyleSheet.create({
     alignItems: "center",
     paddingVertical: 8,
     paddingHorizontal: 14,
-    borderRadius: 18,
+    borderRadius: R.md,
     shadowColor: C.pinkDark,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.25,
@@ -7194,7 +7757,7 @@ const s = StyleSheet.create({
 
   tripDetailAddBtnText: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.white,
     marginLeft: 4,
   },
@@ -7206,7 +7769,7 @@ const s = StyleSheet.create({
 
   tripHeroCard: {
     backgroundColor: C.white,
-    borderRadius: 24,
+    borderRadius: R.lg,
     padding: 20,
     borderWidth: 1,
     borderColor: C.border,
@@ -7226,7 +7789,7 @@ const s = StyleSheet.create({
 
   tripHeroBudgetLabel: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 12,
+    fontSize: 13,
     color: C.textMuted,
   },
 
@@ -7244,7 +7807,7 @@ const s = StyleSheet.create({
     backgroundColor: C.pinkLight,
     paddingHorizontal: 10,
     paddingVertical: 5,
-    borderRadius: 12,
+    borderRadius: R.sm,
   },
 
   tripHeroBadgeText: {
@@ -7286,7 +7849,7 @@ const s = StyleSheet.create({
   segmentTabsContainer: {
     flexDirection: "row",
     backgroundColor: "#F2E8EB",
-    borderRadius: 16,
+    borderRadius: R.md,
     padding: 4,
     marginBottom: 16,
   },
@@ -7297,7 +7860,7 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingVertical: 10,
-    borderRadius: 12,
+    borderRadius: R.sm,
   },
 
   segmentTabActive: {
@@ -7311,7 +7874,7 @@ const s = StyleSheet.create({
 
   segmentTabText: {
     fontFamily: "Prompt_500Medium",
-    fontSize: 12,
+    fontSize: 13,
     color: C.textMuted,
     marginLeft: 6,
   },
@@ -7327,7 +7890,7 @@ const s = StyleSheet.create({
 
   expenseItemCard: {
     backgroundColor: C.white,
-    borderRadius: 20,
+    borderRadius: R.md,
     padding: 16,
     marginBottom: 12,
     borderWidth: 1,
@@ -7347,7 +7910,7 @@ const s = StyleSheet.create({
   expenseIconBox: {
     width: 38,
     height: 38,
-    borderRadius: 12,
+    borderRadius: R.sm,
     backgroundColor: C.pinkLight,
     alignItems: "center",
     justifyContent: "center",
@@ -7392,7 +7955,7 @@ const s = StyleSheet.create({
     backgroundColor: C.greenLight,
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 10,
+    borderRadius: R.sm,
     marginRight: 6,
     marginVertical: 2,
   },
@@ -7410,7 +7973,7 @@ const s = StyleSheet.create({
     backgroundColor: C.blueLight,
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 10,
+    borderRadius: R.sm,
     marginVertical: 2,
   },
 
@@ -7443,7 +8006,7 @@ const s = StyleSheet.create({
 
   algoBanner: {
     backgroundColor: C.pinkLight,
-    borderRadius: 16,
+    borderRadius: R.md,
     padding: 14,
     flexDirection: "row",
     alignItems: "center",
@@ -7455,7 +8018,7 @@ const s = StyleSheet.create({
   algoIconCircle: {
     width: 32,
     height: 32,
-    borderRadius: 16,
+    borderRadius: R.md,
     backgroundColor: C.white,
     alignItems: "center",
     justifyContent: "center",
@@ -7463,20 +8026,20 @@ const s = StyleSheet.create({
 
   algoBannerTitle: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.pinkDark,
   },
 
   algoBannerDesc: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 10,
+    fontSize: 11,
     color: C.textMuted,
     marginTop: 2,
   },
 
   settlementCard: {
     backgroundColor: C.white,
-    borderRadius: 22,
+    borderRadius: R.lg,
     padding: 18,
     borderWidth: 1,
     borderColor: C.border,
@@ -7506,7 +8069,7 @@ const s = StyleSheet.create({
     backgroundColor: C.pinkLight,
     paddingHorizontal: 10,
     paddingVertical: 5,
-    borderRadius: 12,
+    borderRadius: R.sm,
   },
 
   copySummaryBtnText: {
@@ -7531,7 +8094,7 @@ const s = StyleSheet.create({
 
   settlementZeroText: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 12,
+    fontSize: 13,
     color: C.textMuted,
     marginTop: 4,
     textAlign: "center",
@@ -7540,7 +8103,7 @@ const s = StyleSheet.create({
   transferCard: {
     flexDirection: "column",
     backgroundColor: C.white,
-    borderRadius: 18,
+    borderRadius: R.md,
     padding: 14,
     marginBottom: 12,
     borderWidth: 1.5,
@@ -7561,7 +8124,7 @@ const s = StyleSheet.create({
   transferQrFullBtn: {
     width: "100%",
     backgroundColor: C.pinkLight,
-    borderRadius: 12,
+    borderRadius: R.sm,
     paddingVertical: 9,
     paddingHorizontal: 12,
     borderWidth: 1,
@@ -7578,7 +8141,7 @@ const s = StyleSheet.create({
   transferQrIconBadge: {
     width: 24,
     height: 24,
-    borderRadius: 12,
+    borderRadius: R.sm,
     backgroundColor: C.pinkDark,
     alignItems: "center",
     justifyContent: "center",
@@ -7588,14 +8151,14 @@ const s = StyleSheet.create({
   transferQrFullBtnText: {
     flex: 1,
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.pinkDark,
   },
 
   breakdownQrBtn: {
     width: 28,
     height: 28,
-    borderRadius: 14,
+    borderRadius: R.md,
     backgroundColor: C.pinkLight,
     alignItems: "center",
     justifyContent: "center",
@@ -7612,7 +8175,7 @@ const s = StyleSheet.create({
   transferAvatar: {
     width: 34,
     height: 34,
-    borderRadius: 17,
+    borderRadius: R.md,
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 4,
@@ -7620,14 +8183,14 @@ const s = StyleSheet.create({
 
   transferPartyName: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.text,
     textAlign: "center",
   },
 
   transferPartyRole: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 10,
+    fontSize: 11,
     color: C.textMuted,
     marginTop: 1,
   },
@@ -7659,13 +8222,13 @@ const s = StyleSheet.create({
 
   transferStatusText: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 10,
+    fontSize: 11,
     color: C.muted,
   },
 
   breakdownCard: {
     backgroundColor: C.white,
-    borderRadius: 20,
+    borderRadius: R.md,
     padding: 14,
     borderWidth: 1,
     borderColor: C.border,
@@ -7688,7 +8251,7 @@ const s = StyleSheet.create({
   breakdownAvatar: {
     width: 32,
     height: 32,
-    borderRadius: 16,
+    borderRadius: R.md,
     backgroundColor: C.pinkLight,
     alignItems: "center",
     justifyContent: "center",
@@ -7702,7 +8265,7 @@ const s = StyleSheet.create({
 
   breakdownSub: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 10,
+    fontSize: 11,
     color: C.muted,
     marginTop: 2,
   },
@@ -7711,7 +8274,7 @@ const s = StyleSheet.create({
     backgroundColor: C.greenLight,
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 10,
+    borderRadius: R.sm,
   },
 
   badgeNetPositiveText: {
@@ -7724,7 +8287,7 @@ const s = StyleSheet.create({
     backgroundColor: C.orangeLight,
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 10,
+    borderRadius: R.sm,
   },
 
   badgeNetNegativeText: {
@@ -7734,10 +8297,10 @@ const s = StyleSheet.create({
   },
 
   badgeNetZero: {
-    backgroundColor: "#F3EFF1",
+    backgroundColor: C.surface,
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 10,
+    borderRadius: R.sm,
   },
 
   badgeNetZeroText: {
@@ -7752,7 +8315,7 @@ const s = StyleSheet.create({
     backgroundColor: C.pinkLight,
     paddingVertical: 5,
     paddingHorizontal: 9,
-    borderRadius: 12,
+    borderRadius: R.sm,
     borderWidth: 1,
     borderColor: "#F7D1DA",
   },
@@ -7771,16 +8334,10 @@ const s = StyleSheet.create({
     marginTop: 2,
   },
 
-  myTagText: {
-    fontFamily: "Prompt_500Medium",
-    fontSize: 11,
-    color: C.pinkDark,
-  },
-
   deleteExpenseBtn: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#FEE2E2",
+    backgroundColor: C.redLight,
     paddingVertical: 3,
     paddingHorizontal: 8,
     borderRadius: 8,
@@ -7790,15 +8347,15 @@ const s = StyleSheet.create({
   deleteExpenseBtnText: {
     fontFamily: "Prompt_500Medium",
     fontSize: 11,
-    color: "#DC2626",
+    color: C.red,
     marginLeft: 3,
   },
 
   // SPLIT MODE SELECTOR STYLES
   splitModeSelector: {
     flexDirection: "row",
-    backgroundColor: "#F3EFF1",
-    borderRadius: 14,
+    backgroundColor: C.surface,
+    borderRadius: R.md,
     padding: 4,
     marginBottom: 14,
   },
@@ -7809,7 +8366,7 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingVertical: 9,
-    borderRadius: 11,
+    borderRadius: R.sm,
   },
 
   splitModeTabActive: {
@@ -7823,7 +8380,7 @@ const s = StyleSheet.create({
 
   splitModeTabText: {
     fontFamily: "Prompt_500Medium",
-    fontSize: 12,
+    fontSize: 13,
     color: C.textMuted,
     marginLeft: 5,
   },
@@ -7836,9 +8393,9 @@ const s = StyleSheet.create({
   itemizedBanner: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#FEF3C7",
+    backgroundColor: C.amberLight,
     padding: 10,
-    borderRadius: 12,
+    borderRadius: R.sm,
     marginBottom: 12,
     borderWidth: 1,
     borderColor: "#FDE68A",
@@ -7855,7 +8412,7 @@ const s = StyleSheet.create({
 
   subItemCard: {
     backgroundColor: C.white,
-    borderRadius: 14,
+    borderRadius: R.md,
     padding: 12,
     marginBottom: 10,
     borderWidth: 1,
@@ -7893,10 +8450,10 @@ const s = StyleSheet.create({
   },
 
   subItemInput: {
-    backgroundColor: "#FAF7F8",
+    backgroundColor: C.surface,
     borderWidth: 1,
     borderColor: C.border,
-    borderRadius: 10,
+    borderRadius: R.sm,
     paddingHorizontal: 12,
     paddingVertical: 8,
     fontFamily: "Prompt_400Regular",
@@ -7939,10 +8496,10 @@ const s = StyleSheet.create({
   subItemChip: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#F3EFF1",
+    backgroundColor: C.surface,
     paddingVertical: 5,
     paddingHorizontal: 9,
-    borderRadius: 12,
+    borderRadius: R.sm,
     borderWidth: 1,
     borderColor: "transparent",
   },
@@ -7985,7 +8542,7 @@ const s = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: "#F7D1DA",
     borderStyle: "dashed",
-    borderRadius: 14,
+    borderRadius: R.md,
     paddingVertical: 11,
     marginBottom: 14,
   },
@@ -7999,7 +8556,7 @@ const s = StyleSheet.create({
 
   itemizedTotalCard: {
     backgroundColor: "#FDF4F6",
-    borderRadius: 14,
+    borderRadius: R.md,
     padding: 12,
     borderWidth: 1,
     borderColor: "#FCE7EC",
@@ -8046,13 +8603,13 @@ const s = StyleSheet.create({
 
   itemizedMemberShareName: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 12,
+    fontSize: 13,
     color: C.text,
   },
 
   itemizedMemberShareAmt: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.pinkDark,
   },
 
@@ -8060,7 +8617,7 @@ const s = StyleSheet.create({
   expenseItemizedBadge: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#FEF3C7",
+    backgroundColor: C.amberLight,
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 8,
@@ -8070,7 +8627,7 @@ const s = StyleSheet.create({
 
   expenseItemizedBadgeText: {
     fontFamily: "Prompt_500Medium",
-    fontSize: 10,
+    fontSize: 11,
     color: "#92400E",
     marginLeft: 4,
   },
@@ -8082,7 +8639,7 @@ const s = StyleSheet.create({
     backgroundColor: C.pinkLight,
     paddingVertical: 5,
     paddingHorizontal: 10,
-    borderRadius: 10,
+    borderRadius: R.sm,
     marginTop: 4,
   },
 
@@ -8094,8 +8651,8 @@ const s = StyleSheet.create({
   },
 
   subItemsAccordionCard: {
-    backgroundColor: "#FAF7F8",
-    borderRadius: 12,
+    backgroundColor: C.surface,
+    borderRadius: R.sm,
     padding: 10,
     marginTop: 6,
     borderWidth: 1,
@@ -8113,26 +8670,26 @@ const s = StyleSheet.create({
 
   subItemAccordionName: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.text,
   },
 
   subItemAccordionEaters: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 10,
+    fontSize: 11,
     color: C.muted,
     marginTop: 1,
   },
 
   subItemAccordionPrice: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.pinkDark,
   },
 
   subItemAccordionShare: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 9,
+    fontSize: 11,
     color: C.muted,
   },
 
@@ -8164,7 +8721,7 @@ const s = StyleSheet.create({
     backgroundColor: C.pinkLight,
     paddingVertical: 6,
     paddingHorizontal: 12,
-    borderRadius: 14,
+    borderRadius: R.md,
     borderWidth: 1,
     borderColor: "#F7D1DA",
   },
@@ -8195,7 +8752,7 @@ const s = StyleSheet.create({
     backgroundColor: "#FEF2F4",
     paddingVertical: 8,
     paddingHorizontal: 20,
-    borderRadius: 14,
+    borderRadius: R.md,
     borderWidth: 1,
     borderColor: "#FCE7EC",
     alignItems: "center",
@@ -8210,7 +8767,7 @@ const s = StyleSheet.create({
 
   modalAmountVal: {
     fontFamily: "Prompt_700Bold",
-    fontSize: 20,
+    fontSize: 30,
     color: C.pinkDark,
     letterSpacing: -0.5,
   },
@@ -8218,12 +8775,12 @@ const s = StyleSheet.create({
   qrDisplayCard: {
     width: 220,
     height: 220,
-    borderRadius: 16,
+    borderRadius: R.md,
     backgroundColor: C.white,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 2,
-    borderColor: "#F3EFF1",
+    borderColor: C.surface,
     shadowColor: C.shadow,
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.6,
@@ -8236,7 +8793,25 @@ const s = StyleSheet.create({
   qrLargeImage: {
     width: 204,
     height: 204,
-    borderRadius: 12,
+    borderRadius: R.sm,
+  },
+
+  qrSaveButton: {
+    width: "100%",
+    minHeight: 42,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C.pinkLight,
+    borderRadius: R.md,
+    marginBottom: 10,
+  },
+
+  qrSaveButtonText: {
+    fontFamily: "Prompt_600SemiBold",
+    fontSize: 13,
+    color: C.pinkDark,
+    marginLeft: 6,
   },
 
   noQrInsideModal: {
@@ -8246,7 +8821,7 @@ const s = StyleSheet.create({
 
   noQrInsideModalText: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 12,
+    fontSize: 13,
     color: C.muted,
     textAlign: "center",
     marginVertical: 10,
@@ -8256,7 +8831,7 @@ const s = StyleSheet.create({
     backgroundColor: C.pinkLight,
     paddingVertical: 6,
     paddingHorizontal: 12,
-    borderRadius: 12,
+    borderRadius: R.sm,
   },
 
   modalSetupQrBtnText: {
@@ -8267,8 +8842,8 @@ const s = StyleSheet.create({
 
   qrMetaCard: {
     width: "100%",
-    backgroundColor: "#FAF7F8",
-    borderRadius: 12,
+    backgroundColor: C.surface,
+    borderRadius: R.sm,
     padding: 10,
     borderWidth: 1,
     borderColor: C.borderLight,
@@ -8290,7 +8865,7 @@ const s = StyleSheet.create({
 
   qrMetaValue: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.text,
   },
 
@@ -8301,7 +8876,7 @@ const s = StyleSheet.create({
 
   qrScanTipText: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 10,
+    fontSize: 11,
     color: C.muted,
     textAlign: "center",
     marginTop: 4,
@@ -8310,7 +8885,7 @@ const s = StyleSheet.create({
 
   modalBtnPrimary: {
     backgroundColor: C.pink,
-    borderRadius: 14,
+    borderRadius: R.md,
     paddingVertical: 10,
     alignItems: "center",
     justifyContent: "center",
@@ -8327,7 +8902,7 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: C.pinkLight,
-    borderRadius: 14,
+    borderRadius: R.md,
     paddingVertical: 10,
     borderWidth: 1,
     borderColor: "#F7D1DA",
@@ -8343,8 +8918,8 @@ const s = StyleSheet.create({
   // QR SETUP PICKER & DASHED BOX
   qrImagePickedBox: {
     alignItems: "center",
-    backgroundColor: "#FAF7F8",
-    borderRadius: 14,
+    backgroundColor: C.surface,
+    borderRadius: R.md,
     padding: 12,
     borderWidth: 1,
     borderColor: C.borderLight,
@@ -8354,7 +8929,7 @@ const s = StyleSheet.create({
   qrImagePickedPreview: {
     width: 150,
     height: 150,
-    borderRadius: 10,
+    borderRadius: R.sm,
     backgroundColor: C.white,
   },
 
@@ -8370,7 +8945,7 @@ const s = StyleSheet.create({
     backgroundColor: C.white,
     paddingVertical: 5,
     paddingHorizontal: 10,
-    borderRadius: 10,
+    borderRadius: R.sm,
     borderWidth: 1,
     borderColor: C.border,
   },
@@ -8383,11 +8958,11 @@ const s = StyleSheet.create({
   },
 
   qrUploadDashedBox: {
-    backgroundColor: "#FAF7F8",
+    backgroundColor: C.surface,
     borderWidth: 1.5,
     borderColor: "#F3C5CD",
     borderStyle: "dashed",
-    borderRadius: 14,
+    borderRadius: R.md,
     paddingVertical: 20,
     alignItems: "center",
     justifyContent: "center",
@@ -8400,14 +8975,14 @@ const s = StyleSheet.create({
 
   qrUploadDashedTitle: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.pinkDark,
     marginTop: 6,
   },
 
   qrUploadDashedDesc: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 10,
+    fontSize: 11,
     color: C.muted,
     marginTop: 2,
   },
@@ -8415,7 +8990,7 @@ const s = StyleSheet.create({
   // PROFILE QR SECTION
   profileQrCard: {
     backgroundColor: C.white,
-    borderRadius: 20,
+    borderRadius: R.md,
     padding: 16,
     marginBottom: 16,
     borderWidth: 1,
@@ -8436,7 +9011,7 @@ const s = StyleSheet.create({
   profileQrIconBox: {
     width: 36,
     height: 36,
-    borderRadius: 18,
+    borderRadius: R.md,
     backgroundColor: C.pinkLight,
     alignItems: "center",
     justifyContent: "center",
@@ -8450,7 +9025,7 @@ const s = StyleSheet.create({
 
   profileQrDesc: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 10,
+    fontSize: 11,
     color: C.textMuted,
     marginTop: 1,
   },
@@ -8458,9 +9033,9 @@ const s = StyleSheet.create({
   userQrPreviewBox: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#FAF7F8",
+    backgroundColor: C.surface,
     padding: 12,
-    borderRadius: 14,
+    borderRadius: R.md,
     borderWidth: 1,
     borderColor: C.borderLight,
   },
@@ -8468,7 +9043,7 @@ const s = StyleSheet.create({
   userQrThumbWrap: {
     width: 60,
     height: 60,
-    borderRadius: 10,
+    borderRadius: R.sm,
     backgroundColor: C.white,
     overflow: "hidden",
     borderWidth: 1,
@@ -8482,7 +9057,7 @@ const s = StyleSheet.create({
 
   userQrPromptpayText: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.text,
   },
 
@@ -8512,17 +9087,17 @@ const s = StyleSheet.create({
 
   userQrActionText: {
     fontFamily: "Prompt_500Medium",
-    fontSize: 10,
+    fontSize: 11,
     color: C.pinkDark,
     marginLeft: 3,
   },
 
   noQrPromptBox: {
-    backgroundColor: "#FAF7F8",
+    backgroundColor: C.surface,
     borderWidth: 1.5,
     borderColor: "#F3C5CD",
     borderStyle: "dashed",
-    borderRadius: 14,
+    borderRadius: R.md,
     paddingVertical: 16,
     alignItems: "center",
     justifyContent: "center",
@@ -8534,14 +9109,14 @@ const s = StyleSheet.create({
 
   noQrTitle: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.pinkDark,
     marginTop: 4,
   },
 
   noQrSubtitle: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 10,
+    fontSize: 11,
     color: C.muted,
     marginTop: 2,
     textAlign: "center",
@@ -8578,7 +9153,7 @@ const s = StyleSheet.create({
     transform: [{ translateX: -100 }],
     width: 200,
     backgroundColor: C.white,
-    borderRadius: 14,
+    borderRadius: R.md,
     paddingHorizontal: 10,
     paddingVertical: 6,
     shadowColor: C.shadowMedium,
@@ -8590,7 +9165,7 @@ const s = StyleSheet.create({
 
   duckSpeechText: {
     fontFamily: "Prompt_500Medium",
-    fontSize: 10,
+    fontSize: 11,
     color: C.text,
     textAlign: "center",
   },
@@ -8636,7 +9211,7 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "flex-start",
     padding: 13,
-    borderRadius: 16,
+    borderRadius: R.md,
     backgroundColor: "#FFF9F5",
     marginTop: 10,
   },
@@ -8648,7 +9223,7 @@ const s = StyleSheet.create({
   notificationIcon: {
     width: 36,
     height: 36,
-    borderRadius: 18,
+    borderRadius: R.md,
     backgroundColor: C.white,
     alignItems: "center",
     justifyContent: "center",
@@ -8657,14 +9232,14 @@ const s = StyleSheet.create({
 
   notificationDate: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 10,
+    fontSize: 11,
     color: C.muted,
     marginTop: 3,
   },
 
   coverUploadButton: {
     minHeight: 44,
-    borderRadius: 14,
+    borderRadius: R.md,
     backgroundColor: C.pinkLight,
     flexDirection: "row",
     alignItems: "center",
@@ -8674,7 +9249,7 @@ const s = StyleSheet.create({
 
   coverUploadText: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 12,
+    fontSize: 13,
     color: C.pinkDark,
     marginLeft: 7,
   },
@@ -8682,27 +9257,27 @@ const s = StyleSheet.create({
   coverPreview: {
     width: "100%",
     height: 130,
-    borderRadius: 16,
+    borderRadius: R.md,
     marginBottom: 12,
   },
 
   groupCoverImage: {
     width: "100%",
     height: 150,
-    borderRadius: 18,
+    borderRadius: R.md,
     marginBottom: 14,
   },
 
   memberAvatarImage: {
     width: 38,
     height: 38,
-    borderRadius: 19,
+    borderRadius: R.md,
   },
 
   profileCoverWrap: {
     height: 150,
     marginTop: 16,
-    borderRadius: 22,
+    borderRadius: R.lg,
     overflow: "hidden",
     backgroundColor: C.pinkLight,
   },
@@ -8724,7 +9299,7 @@ const s = StyleSheet.create({
     bottom: 12,
     width: 30,
     height: 30,
-    borderRadius: 15,
+    borderRadius: R.md,
     backgroundColor: C.pinkDark,
     alignItems: "center",
     justifyContent: "center",
@@ -8736,7 +9311,7 @@ const s = StyleSheet.create({
     bottom: 1,
     width: 23,
     height: 23,
-    borderRadius: 12,
+    borderRadius: R.sm,
     backgroundColor: C.pinkDark,
     alignItems: "center",
     justifyContent: "center",
@@ -8753,19 +9328,19 @@ const s = StyleSheet.create({
     height: 210,
     alignSelf: "center",
     backgroundColor: C.white,
-    borderRadius: 16,
+    borderRadius: R.md,
     marginVertical: 12,
   },
 
   tripPhotoImage: {
     width: "100%",
     height: "100%",
-    borderRadius: 16,
+    borderRadius: R.md,
   },
 
   debtSummaryCard: {
     backgroundColor: "rgba(255,255,255,0.94)",
-    borderRadius: 28,
+    borderRadius: R.lg,
     padding: 18,
     marginBottom: 18,
     shadowColor: C.shadow,
@@ -8807,7 +9382,7 @@ const s = StyleSheet.create({
 
   progressCaption: {
     fontFamily: "Prompt_400Regular",
-    fontSize: 10,
+    fontSize: 11,
     color: C.textMuted,
     marginTop: 6,
   },
@@ -8831,31 +9406,14 @@ const s = StyleSheet.create({
 
   debtTransferAction: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 10,
+    fontSize: 11,
     color: C.pinkDark,
-  },
-
-  settleBillButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 4,
-    paddingHorizontal: 7,
-    marginTop: 3,
-    borderRadius: 10,
-    backgroundColor: C.greenLight,
-  },
-
-  settleBillText: {
-    fontFamily: "Prompt_600SemiBold",
-    color: C.green,
-    fontSize: 10,
-    marginLeft: 3,
   },
 
   tripListImage: {
     width: "100%",
     height: "100%",
-    borderRadius: 12,
+    borderRadius: R.sm,
   },
 
   settleTransferButton: {
@@ -8868,7 +9426,7 @@ const s = StyleSheet.create({
 
   settleTransferText: {
     fontFamily: "Prompt_600SemiBold",
-    fontSize: 10,
+    fontSize: 11,
     color: C.green,
   },
 
@@ -8884,7 +9442,7 @@ const s = StyleSheet.create({
     width: 230,
     alignItems: "center",
     backgroundColor: C.white,
-    borderRadius: 28,
+    borderRadius: R.lg,
     padding: 20,
   },
 });
