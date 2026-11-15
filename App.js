@@ -489,6 +489,26 @@ export default function App() {
     });
   };
 
+  const persistProfile = async (profile) => {
+    const { error } = await supabase.from("profiles").upsert(profile);
+    if (error) throw error;
+  };
+
+  const saveOwnProfile = async (fields = {}) => {
+    if (!userId) throw new Error("กรุณาเข้าสู่ระบบก่อนบันทึกโปรไฟล์");
+    await persistProfile({
+      id: userId,
+      full_name: name.trim(),
+      email: email.trim(),
+      phone: phone.trim(),
+      currency: currency.includes("USD") ? "USD" : "THB",
+      avatar_url: profileAvatarUrl || null,
+      cover_url: profileCoverUrl || null,
+      qr_code_url: userQrData?.qrUri || null,
+      ...fields,
+    });
+  };
+
   const uploadImageAsset = async (asset, category) => {
     let body;
     if (asset.file && typeof asset.file.arrayBuffer === "function") {
@@ -535,19 +555,11 @@ export default function App() {
       setBusy(true);
       const url = await uploadImageAsset(selection.assets[0], category);
       if (category === "avatar") {
+        await saveOwnProfile({ avatar_url: url });
         setProfileAvatarUrl(url);
-        const { error } = await supabase.from("profiles").upsert({
-          id: userId,
-          avatar_url: url,
-        });
-        if (error) throw error;
       } else if (category === "profile-cover") {
+        await saveOwnProfile({ cover_url: url });
         setProfileCoverUrl(url);
-        const { error } = await supabase.from("profiles").upsert({
-          id: userId,
-          cover_url: url,
-        });
-        if (error) throw error;
       } else if (category === "group-cover") {
         setGroupCoverUrl(url);
       } else if (category === "trip-cover") {
@@ -666,11 +678,7 @@ export default function App() {
         .in("trip_id", tripIds);
 
     if (expenseError) {
-      console.log(
-        "Load expenses error:",
-        expenseError.message
-      );
-
+      showAlert("โหลดสรุปค่าใช้จ่ายไม่สำเร็จ", expenseError.message);
       return tripList;
     }
 
@@ -803,10 +811,7 @@ export default function App() {
         .in("id", userIds);
 
     if (profileError) {
-      console.log(
-        "Load member profiles error:",
-        profileError.message
-      );
+      showAlert("โหลดโปรไฟล์สมาชิกไม่สำเร็จ", profileError.message);
     }
 
     if (profiles && profiles.length > 0) {
@@ -814,10 +819,9 @@ export default function App() {
         const next = { ...prev };
         profiles.forEach((p) => {
           next[p.id] = {
-            ...next[p.id],
-            promptpay: p.phone || next[p.id]?.promptpay || "",
+              promptpay: p.phone || "",
             accountName: p.full_name || "",
-            qrUri: p.qr_code_url || next[p.id]?.qrUri || "",
+              qrUri: p.qr_code_url || "",
             base64: "",
           };
         });
@@ -849,7 +853,12 @@ export default function App() {
 
     const loadedMembers = await loadMembers(group.id);
     const loadedTrips = await loadTrips(userId, group.id);
-    await loadGroupExpenses(group.id);
+    try {
+      await loadGroupExpenses(group.id);
+    } catch (error) {
+      setGroupExpenses([]);
+      showAlert("โหลดสรุปยอดกลุ่มไม่สำเร็จ", error.message);
+    }
     if (expenseModal) {
       setExpenseParticipants((loadedMembers || []).map((member) => member.user_id));
       setExpensePayer(userId);
@@ -875,6 +884,7 @@ export default function App() {
     setGroupActionBusy(true);
 
     try {
+      const previousGroupIds = new Set(groups.map((group) => group.id));
       const { data, error } = await supabase.rpc(
         "create_group",
         {
@@ -888,12 +898,11 @@ export default function App() {
       const loadedGroups = await loadGroups(userId);
 
       const newGroup = loadedGroups.find(
-        (group) => group.id === data
-      );
+        (group) => group.id === (typeof data === "string" ? data : data?.id)
+      ) || loadedGroups.find((group) => !previousGroupIds.has(group.id));
 
-      if (newGroup) {
-        await selectGroup(newGroup);
-      }
+      if (!newGroup) throw new Error("สร้างกลุ่มแล้วแต่โหลดกลุ่มใหม่ไม่พบ");
+      await selectGroup(newGroup);
 
       setGroupName("");
       setGroupCoverUrl("");
@@ -930,10 +939,11 @@ export default function App() {
     setGroupActionBusy(true);
 
     try {
+      const inviteCode = joinCode.trim();
       const { data, error } = await supabase.rpc(
         "join_group_by_code",
         {
-          p_code: joinCode.trim(),
+          p_code: inviteCode,
         }
       );
 
@@ -942,12 +952,13 @@ export default function App() {
       const loadedGroups = await loadGroups(userId);
 
       const joinedGroup = loadedGroups.find(
-        (group) => group.id === data
+        (group) => group.id === (typeof data === "string" ? data : data?.id)
+      ) || loadedGroups.find(
+        (group) => String(group.invite_code).toUpperCase() === inviteCode.toUpperCase()
       );
 
-      if (joinedGroup) {
-        await selectGroup(joinedGroup);
-      }
+      if (!joinedGroup) throw new Error("เข้าร่วมกลุ่มแล้วแต่โหลดข้อมูลกลุ่มไม่พบ");
+      await selectGroup(joinedGroup);
 
       setJoinCode("");
 
@@ -1082,10 +1093,7 @@ export default function App() {
       .maybeSingle();
 
     if (error) {
-      console.log(
-        "Profile loading error:",
-        error.message
-      );
+      showAlert("โหลดโปรไฟล์ไม่สำเร็จ", error.message);
     }
 
     const resolvedName =
@@ -1097,21 +1105,23 @@ export default function App() {
     setName(resolvedName);
     setProfileAvatarUrl(data?.avatar_url || "");
     setProfileCoverUrl(data?.cover_url || "");
+    const resolvedCurrency = data?.currency === "USD" ? "USD" : "THB";
+    setCurrency(resolvedCurrency === "USD" ? "ดอลลาร์ (USD)" : "บาท (THB)");
 
-    if (resolvedName) {
+    if (!error) {
       try {
-        await supabase.from("profiles").upsert({
+        await persistProfile({
           id: user.id,
           full_name: resolvedName,
           email: user.email || "",
-          phone: data?.phone || user.user_metadata?.phone || phone || "",
+          phone: data?.phone ?? user.user_metadata?.phone ?? "",
           avatar_url: data?.avatar_url || null,
           cover_url: data?.cover_url || null,
           qr_code_url: data?.qr_code_url || null,
-          currency: currency.includes("USD") ? "USD" : "THB",
+          currency: resolvedCurrency,
         });
       } catch (err) {
-        console.log("Sync profile error:", err);
+        showAlert("บันทึกโปรไฟล์ไม่สำเร็จ", err.message);
       }
     }
 
@@ -1125,25 +1135,27 @@ export default function App() {
     } catch {}
 
     const extractedPhone = data?.phone || "";
-    if (data?.qr_code_url || extractedPhone) {
-      const qr = {
-        promptpay: extractedPhone,
-        bankName: "",
-        accountName: resolvedName,
-        qrUri: data?.qr_code_url || "",
-        base64: "",
-      };
-      setUserQrData(qr);
+    const qr = data?.qr_code_url || extractedPhone
+      ? {
+          promptpay: extractedPhone,
+          bankName: "",
+          accountName: resolvedName,
+          qrUri: data?.qr_code_url || "",
+          base64: "",
+        }
+      : null;
+    setUserQrData(qr);
+    if (qr) {
       setMemberQrMap((prev) => ({ ...prev, [user.id]: qr }));
+    } else {
+      setMemberQrMap((prev) => {
+        const next = { ...prev };
+        delete next[user.id];
+        return next;
+      });
     }
 
     setPhone(extractedPhone);
-
-    setCurrency(
-      data?.currency === "USD"
-        ? "ดอลลาร์ (USD)"
-        : "บาท (THB)"
-    );
 
     const loadedGroups = await loadGroups(user.id);
 
@@ -1154,7 +1166,12 @@ export default function App() {
 
       await loadMembers(firstGroup.id);
       await loadTrips(user.id, firstGroup.id);
-      await loadGroupExpenses(firstGroup.id);
+      try {
+        await loadGroupExpenses(firstGroup.id);
+      } catch (expenseError) {
+        setGroupExpenses([]);
+        showAlert("โหลดสรุปยอดกลุ่มไม่สำเร็จ", expenseError.message);
+      }
     } else {
       setActiveGroup(null);
       setMembers([]);
@@ -1167,7 +1184,7 @@ export default function App() {
     try {
       await loadNotifications(user.id);
     } catch (notificationError) {
-      console.log("Load notifications error:", notificationError.message);
+      showAlert("โหลดการแจ้งเตือนไม่สำเร็จ", notificationError.message);
     }
 
     setTab("home");
@@ -1225,6 +1242,12 @@ export default function App() {
           setPassword("");
           setConfirm("");
           setPhone("");
+          setCurrency("บาท (THB)");
+          setProfileAvatarUrl("");
+          setProfileCoverUrl("");
+          setUserQrData(null);
+          setNotificationRows([]);
+          setGroupExpenses([]);
 
           setGroups([]);
           setActiveGroup(null);
@@ -1400,18 +1423,6 @@ export default function App() {
       if (error) throw error;
 
       if (data.session && data.user) {
-        if (name.trim()) {
-          try {
-            await supabase.from("profiles").upsert({
-              id: data.user.id,
-              full_name: name.trim(),
-              phone: phone.trim(),
-              currency: currency.includes("USD") ? "USD" : "THB",
-            });
-          } catch (e) {
-            console.log("Upsert on signup error:", e);
-          }
-        }
         await loadUserData(data.user);
       } else {
         // Try to auto-login immediately without requiring email verification
@@ -1421,36 +1432,29 @@ export default function App() {
         });
 
         if (autoLogin.data?.session && autoLogin.data?.user) {
-          if (name.trim()) {
-            try {
-              await supabase.from("profiles").upsert({
-                id: autoLogin.data.user.id,
-                full_name: name.trim(),
-                phone: phone.trim(),
-                currency: currency.includes("USD") ? "USD" : "THB",
-              });
-            } catch (e) {
-              console.log("Upsert on signup error:", e);
-            }
-          }
           await loadUserData(autoLogin.data.user);
         } else {
           if (data.user) {
             try {
-              await supabase.from("profiles").upsert({
+              await persistProfile({
                 id: data.user.id,
                 full_name: name.trim(),
+                email: email.trim(),
                 phone: phone.trim(),
                 currency: currency.includes("USD") ? "USD" : "THB",
+                avatar_url: null,
+                cover_url: null,
+                qr_code_url: null,
               });
-            } catch (e) {
-              console.log("Upsert on signup error:", e);
+            } catch (profileError) {
+              showAlert("สร้างบัญชีแล้ว แต่บันทึกโปรไฟล์ไม่สำเร็จ", profileError.message);
+              return;
             }
           }
 
           showAlert(
             "สมัครสมาชิกสำเร็จ",
-            "สร้างบัญชีเรียบร้อยแล้ว เข้าสู่ระบบได้ทันที",
+            "สร้างบัญชีแล้ว กรุณาตรวจสอบอีเมลเพื่อยืนยันก่อนเข้าสู่ระบบ",
             [
               {
                 text: "เข้าสู่ระบบ",
@@ -1519,17 +1523,7 @@ export default function App() {
     }
     setBusy(true);
     try {
-      const { error } = await supabase.from("profiles").upsert({
-        id: userId,
-        full_name: name.trim(),
-        email: email.trim(),
-        phone: phone.trim(),
-        avatar_url: profileAvatarUrl || null,
-        cover_url: profileCoverUrl || null,
-        qr_code_url: userQrData?.qrUri || null,
-        currency: currency.includes("USD") ? "USD" : "THB",
-      });
-      if (error) throw error;
+      await saveOwnProfile();
       setProfileModal(false);
       showAlert("สำเร็จ", "บันทึกข้อมูลโปรไฟล์เรียบร้อยแล้ว");
     } catch (error) {
@@ -1680,6 +1674,14 @@ export default function App() {
   const saveMemberNickname = async (targetUserId, newName) => {
     if (!newName || !newName.trim()) return;
     const clean = newName.trim();
+    if (targetUserId === userId) {
+      try {
+        await saveOwnProfile({ full_name: clean });
+      } catch (error) {
+        showAlert("บันทึกชื่อไม่สำเร็จ", error.message);
+        return;
+      }
+    }
     const updated = {
       ...memberNicknames,
       [targetUserId]: clean,
@@ -1688,16 +1690,8 @@ export default function App() {
     try {
       await AsyncStorage.setItem("@tb_member_nicknames", JSON.stringify(updated));
     } catch (e) {
-      console.log("Save nickname error:", e);
-    }
-
-    try {
-      await supabase.from("profiles").upsert({
-        id: targetUserId,
-        full_name: clean,
-      });
-    } catch (e) {
-      console.log("Upsert member profile error:", e);
+      showAlert("บันทึกชื่อเล่นในเครื่องไม่สำเร็จ", e.message || "กรุณาลองใหม่");
+      return;
     }
 
     setEditingMember(null);
@@ -1728,6 +1722,10 @@ export default function App() {
     if (!qrSetupTarget) return;
     const tUid = qrSetupTarget.userId;
     const tName = qrSetupTarget.name;
+    if (tUid !== userId) {
+      showAlert("แก้ไขไม่ได้", "คุณสามารถแก้ไข QR Code ของโปรไฟล์ตัวเองเท่านั้น");
+      return;
+    }
 
     const cleanPromptPay = qrInputPromptPay.trim();
     if (!cleanPromptPay && !qrImageBase64 && !qrImageUri) {
@@ -1753,22 +1751,20 @@ export default function App() {
         ...memberQrMap,
         [tUid]: qrObj,
       };
-      setMemberQrMap(updatedMap);
-
-      if (tUid === userId) {
-        setUserQrData(qrObj);
-        setPhone(cleanPromptPay);
-        await AsyncStorage.setItem(`@tb_user_qr_${tUid}`, JSON.stringify(qrObj));
-      }
-      await AsyncStorage.setItem("@tb_member_qr_map", JSON.stringify(updatedMap));
-
-      const { error } = await supabase.from("profiles").upsert({
-        id: tUid,
+      await saveOwnProfile({
         full_name: tName,
         phone: cleanPromptPay,
         qr_code_url: qrImageUri || null,
       });
-      if (error) throw error;
+      setMemberQrMap(updatedMap);
+      setUserQrData(qrObj);
+      setPhone(cleanPromptPay);
+      try {
+        await AsyncStorage.setItem(`@tb_user_qr_${tUid}`, JSON.stringify(qrObj));
+        await AsyncStorage.setItem("@tb_member_qr_map", JSON.stringify(updatedMap));
+      } catch (cacheError) {
+        console.log("QR cache write failed:", cacheError.message);
+      }
 
       setQrSetupModal(false);
       showAlert("สำเร็จ!", `บันทึกข้อมูล QR Code ของ ${tName} เรียบร้อยแล้ว`);
@@ -1781,6 +1777,10 @@ export default function App() {
 
   const removeQrData = async (targetUserId) => {
     const tUid = targetUserId || userId;
+    if (tUid !== userId) {
+      showAlert("ลบไม่ได้", "คุณสามารถลบ QR Code ของโปรไฟล์ตัวเองเท่านั้น");
+      return;
+    }
     showAlert("ยืนยัน", "ต้องการลบ QR Code และข้อมูลการรับเงินหรือไม่?", [
       { text: "ยกเลิก", style: "cancel" },
       {
@@ -1789,22 +1789,23 @@ export default function App() {
         onPress: async () => {
           const updated = { ...memberQrMap };
           delete updated[tUid];
-          setMemberQrMap(updated);
-          if (tUid === userId) {
-            setUserQrData(null);
-            await AsyncStorage.removeItem(`@tb_user_qr_${tUid}`);
-          }
-          await AsyncStorage.setItem("@tb_member_qr_map", JSON.stringify(updated));
           try {
-            const { error } = await supabase.from("profiles").upsert({
-              id: tUid,
+            await saveOwnProfile({
               phone: "",
               qr_code_url: null,
             });
-            if (error) throw error;
           } catch (error) {
             showAlert("ลบข้อมูลไม่สำเร็จ", error.message);
             return;
+          }
+          setMemberQrMap(updated);
+          setUserQrData(null);
+          setPhone("");
+          try {
+            await AsyncStorage.removeItem(`@tb_user_qr_${tUid}`);
+            await AsyncStorage.setItem("@tb_member_qr_map", JSON.stringify(updated));
+          } catch (cacheError) {
+            console.log("QR cache cleanup failed:", cacheError.message);
           }
           showAlert("สำเร็จ", "ลบข้อมูล QR Code เรียบร้อยแล้ว");
         },
@@ -2027,33 +2028,21 @@ export default function App() {
     return data || [];
   };
 
-  const notifyExpenseParticipants = async (expenseTitle, amount, participantIds) => {
-    const recipients = Array.from(new Set(participantIds))
-      .filter((recipientId) => recipientId !== userId);
-    if (!recipients.length) return;
-    const { error } = await supabase.from("notifications").insert(
-      recipients.map((recipientId) => ({
-        user_id: recipientId,
-        title: "มีบิลใหม่ในกลุ่ม",
-        message: `${name || "เพื่อน"} เพิ่ม "${expenseTitle}" ยอด ฿${Number(amount).toLocaleString()}`,
-        type: "expense_created",
-        is_read: false,
-      }))
-    );
-    if (error) throw error;
-  };
-
   const openNotifications = async () => {
     try {
       const currentNotifications = await loadNotifications(userId);
       const unreadIds = currentNotifications.filter((item) => !item.is_read).map((item) => item.id);
       if (unreadIds.length) {
-        const { error } = await supabase
+        const { data: updatedRows, error } = await supabase
           .from("notifications")
           .update({ is_read: true })
           .in("id", unreadIds)
-          .eq("user_id", userId);
+          .eq("user_id", userId)
+          .select("id");
         if (error) throw error;
+        if ((updatedRows || []).length !== unreadIds.length) {
+          throw new Error("อัปเดตสถานะอ่านแล้วไม่ครบ กรุณาตรวจสอบสิทธิ์ฐานข้อมูล");
+        }
         setNotificationRows((current) => current.map((item) => ({ ...item, is_read: true })));
       }
       setNotificationModal(true);
@@ -2141,146 +2130,137 @@ export default function App() {
     setExpenseModal(true);
   };
 
+  const settleExpense = (expense) => {
+    showAlert(
+      "ยืนยันเคลียร์รายการ",
+      `ทำเครื่องหมายว่ารายการ "${expense.title}" จำนวน ฿${Number(expense.amount).toLocaleString()} เคลียร์ครบแล้วหรือไม่?`,
+      [
+        { text: "ยกเลิก", style: "cancel" },
+        {
+          text: "เคลียร์ยอด",
+          onPress: async () => {
+            setBusy(true);
+            try {
+              const { data: updatedRows, error } = await supabase
+                .from("expenses")
+                .update({ is_settled: true })
+                .eq("id", expense.id)
+                .eq("group_id", activeGroup.id)
+                .select("id");
+              if (error) throw error;
+              if (!updatedRows?.length) throw new Error("ไม่พบรายการหรือไม่มีสิทธิ์เคลียร์ยอด");
+              await loadTripExpenses(expense.trip_id);
+              await loadGroupExpenses(activeGroup.id);
+              showAlert("สำเร็จ", "ทำเครื่องหมายเคลียร์รายการแล้ว");
+            } catch (error) {
+              showAlert("เคลียร์ยอดไม่สำเร็จ", error.message);
+            } finally {
+              setBusy(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const settleTransfer = (transfer) => {
+    const pair = [transfer.from, transfer.to];
+    const candidates = groupExpenses.filter((expense) => {
+      if (expense.is_settled || expense.paid_by !== transfer.to) return false;
+      if (expense.items?.length) {
+        return expense.items.every((item) =>
+          item.participants?.length &&
+          item.participants.every((id) => pair.includes(id))
+        ) && expense.items.some((item) => item.participants.includes(transfer.from));
+      }
+      return expense.participants?.includes(transfer.from) &&
+        expense.participants.every((id) => pair.includes(id));
+    });
+    const contribution = (expense) => {
+      if (expense.items?.length) {
+        return expense.items.reduce((sum, item) => {
+          if (!item.participants.includes(transfer.from)) return sum;
+          return sum + Number(item.amount || 0) / item.participants.length;
+        }, 0);
+      }
+      return Number(expense.amount || 0) / expense.participants.length;
+    };
+    const matched = [];
+    let remaining = transfer.amount;
+    for (const expense of candidates) {
+      const share = contribution(expense);
+      if (share > 0 && share <= remaining + 0.01) {
+        matched.push(expense);
+        remaining -= share;
+      }
+      if (remaining <= 0.01) break;
+    }
+    if (remaining > 0.01 || matched.length === 0) {
+      showAlert(
+        "เคลียร์ยอดแยกไม่ได้",
+        "ยอดนี้ไม่สามารถจับคู่กับบิลที่เคลียร์ได้พอดี กรุณาเคลียร์บิลที่เกี่ยวข้องทีละรายการ"
+      );
+      return;
+    }
+    showAlert(
+      "ยืนยันเคลียร์ยอด",
+      `ทำเครื่องหมาย ${matched.length} บิลที่เกี่ยวข้องว่าเคลียร์แล้วหรือไม่?`,
+      [
+        { text: "ยกเลิก", style: "cancel" },
+        {
+          text: "เคลียร์ยอด",
+          onPress: async () => {
+            setBusy(true);
+            try {
+              const ids = matched.map((expense) => expense.id);
+              const { data: updatedRows, error } = await supabase
+                .from("expenses")
+                .update({ is_settled: true })
+                .in("id", ids)
+                .eq("group_id", activeGroup.id)
+                .select("id");
+              if (error) throw error;
+              if (updatedRows?.length !== ids.length) {
+                throw new Error("อัปเดตสถานะเคลียร์ยอดไม่ครบ กรุณาตรวจสอบสิทธิ์ฐานข้อมูล");
+              }
+              await loadGroupExpenses(activeGroup.id);
+              if (selectedTrip) await loadTripExpenses(selectedTrip.id);
+              showAlert("สำเร็จ", "อัปเดตสถานะเคลียร์ยอดเรียบร้อยแล้ว");
+            } catch (error) {
+              showAlert("เคลียร์ยอดไม่สำเร็จ", error.message);
+            } finally {
+              setBusy(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const deleteExpense = (expId, expTitle) => {
     const doDelete = async () => {
       setBusy(true);
       try {
-        // Optimistically remove from state immediately for fast response
-        setTripExpenses((prev) => prev.filter((item) => item.id !== expId));
-
-        const { error } = await supabase
+        const { data: deletedExpense, error } = await supabase
           .from("expenses")
           .delete()
-          .eq("id", expId);
-
-        if (error) {
-          console.log("Delete expense error from Supabase:", error.message);
-          throw error;
-        }
-
-        if (selectedTrip) {
-          await loadTripExpenses(selectedTrip.id);
-        }
+          .eq("id", expId)
+          .eq("group_id", activeGroup.id)
+          .select("id")
+          .maybeSingle();
+        if (error) throw error;
+        if (!deletedExpense) throw new Error("ไม่พบรายการหรือไม่มีสิทธิ์ลบ");
+        if (selectedTrip) await loadTripExpenses(selectedTrip.id);
         if (activeGroup) {
           await loadTrips(userId, activeGroup.id);
           await loadGroupExpenses(activeGroup.id);
         }
-
         showAlert("สำเร็จ", "ลบรายการเรียบร้อยแล้ว");
-      } catch (err) {
-        console.log("Delete expense error:", err);
-        if (selectedTrip) {
-          await loadTripExpenses(selectedTrip.id);
-        }
-        showAlert(
-          "ลบไม่สำเร็จ",
-          err.message || "ไม่สามารถลบรายการได้ กรุณาตรวจสอบสิทธิ์ใน Supabase"
-        );
+      } catch (error) {
+        showAlert("ลบไม่สำเร็จ", error.message || "ไม่สามารถลบรายการได้");
       } finally {
         setBusy(false);
       }
-    };
-
-    const settleExpense = (expense) => {
-      showAlert(
-        "ยืนยันเคลียร์รายการ",
-        `ทำเครื่องหมายว่ารายการ "${expense.title}" จำนวน ฿${Number(expense.amount).toLocaleString()} เคลียร์ครบแล้วหรือไม่?`,
-        [
-          { text: "ยกเลิก", style: "cancel" },
-          {
-            text: "เคลียร์ยอด",
-            onPress: async () => {
-              setBusy(true);
-              try {
-                const { error } = await supabase
-                  .from("expenses")
-                  .update({ is_settled: true })
-                  .eq("id", expense.id)
-                  .eq("group_id", activeGroup.id);
-                if (error) throw error;
-                await loadTripExpenses(expense.trip_id);
-                await loadGroupExpenses(activeGroup.id);
-                showAlert("สำเร็จ", "ทำเครื่องหมายเคลียร์รายการแล้ว");
-              } catch (error) {
-                showAlert("เคลียร์ยอดไม่สำเร็จ", error.message);
-              } finally {
-                setBusy(false);
-              }
-            },
-          },
-        ]
-      );
-    };
-
-    const settleTransfer = (transfer) => {
-      const pair = [transfer.from, transfer.to];
-      const candidates = groupExpenses.filter((expense) => {
-        if (expense.is_settled || expense.paid_by !== transfer.to) return false;
-        if (expense.items?.length) {
-          return expense.items.every((item) =>
-            item.participants?.length &&
-            item.participants.every((id) => pair.includes(id))
-          ) && expense.items.some((item) => item.participants.includes(transfer.from));
-        }
-        return expense.participants?.includes(transfer.from) &&
-          expense.participants.every((id) => pair.includes(id));
-      });
-      const contribution = (expense) => {
-        if (expense.items?.length) {
-          return expense.items.reduce((sum, item) => {
-            if (!item.participants.includes(transfer.from)) return sum;
-            return sum + Number(item.amount || 0) / item.participants.length;
-          }, 0);
-        }
-        const participants = expense.participants;
-        return Number(expense.amount || 0) / participants.length;
-      };
-      const matched = [];
-      let remaining = transfer.amount;
-      for (const expense of candidates) {
-        const share = contribution(expense);
-        if (share <= remaining + 0.01) {
-          matched.push(expense);
-          remaining -= share;
-        }
-        if (remaining <= 0.01) break;
-      }
-      if (remaining > 0.01) {
-        showAlert(
-          "เคลียร์ยอดแยกไม่ได้",
-          "ยอดนี้มาจากหลายบิลหรือมีการหักลบที่ไม่สามารถแทนด้วยสถานะ is_settled รายบิลได้ กรุณาเคลียร์บิลที่เกี่ยวข้องทีละรายการ"
-        );
-        return;
-      }
-      showAlert(
-        "ยืนยันเคลียร์ยอด",
-        `ทำเครื่องหมาย ${matched.length} บิลที่เกี่ยวข้องว่าเคลียร์แล้วหรือไม่?`,
-        [
-          { text: "ยกเลิก", style: "cancel" },
-          {
-            text: "เคลียร์ยอด",
-            onPress: async () => {
-              setBusy(true);
-              try {
-                const ids = matched.map((expense) => expense.id);
-                const { error } = await supabase
-                  .from("expenses")
-                  .update({ is_settled: true })
-                  .in("id", ids)
-                  .eq("group_id", activeGroup.id);
-                if (error) throw error;
-                await loadGroupExpenses(activeGroup.id);
-                if (selectedTrip) await loadTripExpenses(selectedTrip.id);
-                showAlert("สำเร็จ", "อัปเดตสถานะเคลียร์ยอดเรียบร้อยแล้ว");
-              } catch (error) {
-                showAlert("เคลียร์ยอดไม่สำเร็จ", error.message);
-              } finally {
-                setBusy(false);
-              }
-            },
-          },
-        ]
-      );
     };
 
     showAlert(
@@ -2288,11 +2268,7 @@ export default function App() {
       `ต้องการลบรายการ "${expTitle || "นี้"}" หรือไม่?`,
       [
         { text: "ยกเลิก", style: "cancel" },
-        {
-          text: "ลบรายการ",
-          style: "destructive",
-          onPress: doDelete,
-        },
+        { text: "ลบรายการ", style: "destructive", onPress: doDelete },
       ]
     );
   };
@@ -2316,8 +2292,13 @@ export default function App() {
       showAlert("ไม่พบทริป", "กรุณาเลือกทริปที่ต้องการบันทึก");
       return;
     }
+    if (!trips.some((trip) => trip.id === targetTripId)) {
+      showAlert("ไม่พบทริป", "ทริปที่เลือกไม่อยู่ในกลุ่มปัจจุบัน กรุณาเลือกทริปใหม่");
+      return;
+    }
 
     const payer = expensePayer || userId;
+    const selectedParticipants = Array.from(new Set(expenseParticipants));
     let amt = 0;
     if (splitMode === "itemized") {
       if (expenseItems.length === 0) {
@@ -2350,6 +2331,10 @@ export default function App() {
       }
 
     } else {
+      if (selectedParticipants.length === 0) {
+        showAlert("ไม่มีผู้ร่วมหาร", "กรุณาเลือกเพื่อนอย่างน้อย 1 คนเพื่อหารค่าใช้จ่าย");
+        return;
+      }
       amt = Number(expenseAmount.replace(/,/g, "")) || 0;
       if (amt <= 0) {
         showAlert(
@@ -2372,7 +2357,7 @@ export default function App() {
         trip_id: targetTripId,
         split_between: splitMode === "itemized"
           ? Array.from(new Set(expenseItems.flatMap((item) => item.participants)))
-          : (expenseParticipants.length ? expenseParticipants : members.map((member) => member.user_id)),
+          : selectedParticipants,
         slip_url: null,
         is_settled: false,
       }).select("id").single();
@@ -2398,16 +2383,6 @@ export default function App() {
           throw itemError;
         }
       }
-      let notificationError = null;
-      try {
-        const participantIds = splitMode === "itemized"
-          ? expenseItems.flatMap((item) => item.participants)
-          : expenseParticipants;
-        await notifyExpenseParticipants(expenseTitle.trim(), amt, participantIds);
-      } catch (error) {
-        notificationError = error;
-      }
-
       setExpenseModal(false);
       setExpenseTitle("");
       setExpenseAmount("");
@@ -2421,10 +2396,8 @@ export default function App() {
 
       const targetTrip = trips.find((t) => t.id === targetTripId);
       showAlert(
-        notificationError ? "บันทึกสำเร็จ แต่ส่งแจ้งเตือนไม่สำเร็จ" : "สำเร็จ!",
-        notificationError
-          ? `บันทึกบิลแล้ว แต่สร้างการแจ้งเตือนไม่สำเร็จ: ${notificationError.message}`
-          : `บันทึกค่าใช้จ่าย ฿${amt.toLocaleString()} ในทริป "${targetTrip?.title || ""}" เรียบร้อยแล้ว`
+        "สำเร็จ!",
+        `บันทึกค่าใช้จ่าย ฿${amt.toLocaleString()} ในทริป "${targetTrip?.title || ""}" เรียบร้อยแล้ว`
       );
     } catch (error) {
       showAlert("บันทึกไม่สำเร็จ", error.message);
@@ -5151,14 +5124,14 @@ export default function App() {
                             </View>
                           </TouchableOpacity>
 
-                          {!receiverQr?.promptpay && !receiverQr?.qrUri && (
+                          {!receiverQr?.promptpay && !receiverQr?.qrUri && tr.to === userId && (
                             <TouchableOpacity
                               style={{ marginTop: 6, alignSelf: "center", paddingVertical: 2 }}
                               activeOpacity={0.8}
-                              onPress={() => openQrSetupModal(tr.to, toName)}
+                              onPress={() => openQrSetupModal(userId, name || "ฉัน")}
                             >
                               <Text style={{ fontFamily: "Prompt_500Medium", fontSize: 11, color: C.pinkDark }}>
-                                {tr.to === userId ? "+ อัปโหลด QR ของฉัน" : `+ ตั้งค่าพร้อมเพย์ให้ ${toName}`}
+                                + อัปโหลด QR ของฉัน
                               </Text>
                             </TouchableOpacity>
                           )}
