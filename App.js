@@ -1,10 +1,10 @@
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 
 import {
   View,
-  Text,
-  TextInput,
+  Text as NativeText,
+  TextInput as NativeTextInput,
   TouchableOpacity,
   ScrollView,
   SafeAreaView,
@@ -12,7 +12,8 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
-  Alert,
+  Animated,
+  Pressable,
   Image,
   Keyboard,
   Modal,
@@ -22,6 +23,7 @@ import {
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
+import * as Clipboard from "expo-clipboard";
 
 import { Ionicons } from "@expo/vector-icons";
 
@@ -40,10 +42,10 @@ import { supabase, SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from "./supabase";
 // ==========================================
 
 const C = {
-  pink: "#E05D76",
-  pinkDark: "#C7425C",
-  pinkLight: "#FCECEF",
-  pinkBg: "#FAF7F8",
+  pink: "#F06459",
+  pinkDark: "#D94D43",
+  pinkLight: "#FDE8E1",
+  pinkBg: "#FDF5F0",
   white: "#FFFFFF",
   text: "#201317",
   textMuted: "#736067",
@@ -65,6 +67,32 @@ const C = {
 // 3. REUSABLE COMPONENTS
 // ==========================================
 
+function Text({ style, ...props }) {
+  const resolvedStyle = StyleSheet.flatten(style) || {};
+  const fontSize = resolvedStyle.fontSize || 14;
+  return (
+    <NativeText
+      {...props}
+      style={[
+        { lineHeight: Math.ceil(fontSize * 1.65), paddingVertical: 1 },
+        style,
+      ]}
+    />
+  );
+}
+
+function TextInput({ style, ...props }) {
+  return (
+    <NativeTextInput
+      {...props}
+      style={[
+        { lineHeight: 24, paddingVertical: 8 },
+        style,
+      ]}
+    />
+  );
+}
+
 function Button({
   title,
   onPress,
@@ -73,11 +101,27 @@ function Button({
   disabled = false,
   icon,
 }) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const pressIn = () => Animated.spring(scale, {
+    toValue: 0.97,
+    useNativeDriver: true,
+    speed: 28,
+    bounciness: 5,
+  }).start();
+  const pressOut = () => Animated.spring(scale, {
+    toValue: 1,
+    useNativeDriver: true,
+    speed: 24,
+    bounciness: 8,
+  }).start();
   return (
+    <Animated.View style={{ transform: [{ scale }] }}>
     <TouchableOpacity
-      activeOpacity={0.82}
+      activeOpacity={0.9}
       disabled={disabled}
       onPress={onPress}
+      onPressIn={pressIn}
+      onPressOut={pressOut}
       style={[
         s.button,
         outline && s.buttonOutline,
@@ -102,6 +146,7 @@ function Button({
         {title}
       </Text>
     </TouchableOpacity>
+    </Animated.View>
   );
 }
 
@@ -164,12 +209,93 @@ function Brand() {
 }
 
 function Duck({ style }) {
+  const float = useRef(new Animated.Value(0)).current;
+  const tilt = useRef(new Animated.Value(0)).current;
+  const bounce = useRef(new Animated.Value(1)).current;
+  const [messageIndex, setMessageIndex] = useState(-1);
+  const messages = [
+    "เป็ดเตือนแล้วนะ… ใครยังไม่โอนเอ่ย? 🦆",
+    "ทริปสนุก บิลอย่าค้างน้า 😄",
+    "โอนแล้วสะกิดเป็ดด้วยนะ!",
+  ];
+
+  useEffect(() => {
+    const floating = Animated.loop(Animated.sequence([
+      Animated.timing(float, { toValue: 1, duration: 1500, useNativeDriver: true }),
+      Animated.timing(float, { toValue: 0, duration: 1500, useNativeDriver: true }),
+    ]));
+    const swaying = Animated.loop(Animated.sequence([
+      Animated.timing(tilt, { toValue: 1, duration: 1800, useNativeDriver: true }),
+      Animated.timing(tilt, { toValue: -1, duration: 1800, useNativeDriver: true }),
+      Animated.timing(tilt, { toValue: 0, duration: 1800, useNativeDriver: true }),
+    ]));
+    floating.start();
+    swaying.start();
+    return () => {
+      floating.stop();
+      swaying.stop();
+    };
+  }, [float, tilt]);
+
+  const bounceDuck = () => {
+    setMessageIndex((current) => (current + 1) % messages.length);
+    bounce.setValue(0.82);
+    Animated.spring(bounce, {
+      toValue: 1,
+      useNativeDriver: true,
+      speed: 18,
+      bounciness: 12,
+    }).start();
+  };
+  const rotate = tilt.interpolate({
+    inputRange: [-1, 0, 1],
+    outputRange: ["-4deg", "0deg", "4deg"],
+  });
   return (
-    <Image
-      source={require("./assets/Duck.png")}
-      style={style}
-      resizeMode="contain"
-    />
+    <Pressable onPress={bounceDuck} accessibilityRole="button" accessibilityLabel="แตะน้องเป็ด">
+      <Animated.View
+        style={[
+          style,
+          {
+            transform: [
+              { translateY: float.interpolate({ inputRange: [0, 1], outputRange: [0, -7] }) },
+              { rotate },
+              { scale: bounce },
+            ],
+          },
+        ]}
+      >
+        <Image
+          source={require("./assets/Duck.png")}
+          style={{ width: "100%", height: "100%" }}
+          resizeMode="contain"
+        />
+      </Animated.View>
+      {messageIndex >= 0 && (
+        <View style={s.duckSpeech}>
+          <Text style={s.duckSpeechText}>{messages[messageIndex]}</Text>
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
+function AmbientBackground() {
+  const drift = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const animation = Animated.loop(Animated.sequence([
+      Animated.timing(drift, { toValue: 1, duration: 9000, useNativeDriver: true }),
+      Animated.timing(drift, { toValue: 0, duration: 9000, useNativeDriver: true }),
+    ]));
+    animation.start();
+    return () => animation.stop();
+  }, [drift]);
+  const translate = drift.interpolate({ inputRange: [0, 1], outputRange: [-18, 24] });
+  return (
+    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+      <Animated.View style={[s.ambientOrb, s.ambientOrbPeach, { transform: [{ translateX: translate }, { translateY: translate }] }]} />
+      <Animated.View style={[s.ambientOrb, s.ambientOrbCoral, { transform: [{ translateX: Animated.multiply(translate, -0.65) }] }]} />
+    </View>
   );
 }
 
@@ -189,6 +315,24 @@ function BackHeader({ onPress, title = "" }) {
       <View style={{ width: 40 }} />
     </View>
   );
+}
+
+function decodeBase64(value) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const clean = value.replace(/^data:[^,]*;base64,/, "").replace(/[^A-Za-z0-9+/=]/g, "");
+  const bytes = new Uint8Array(Math.floor((clean.length * 3) / 4) - (clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0));
+  let outputIndex = 0;
+  for (let index = 0; index < clean.length; index += 4) {
+    const a = alphabet.indexOf(clean[index]);
+    const b = alphabet.indexOf(clean[index + 1]);
+    const c = alphabet.indexOf(clean[index + 2]);
+    const d = alphabet.indexOf(clean[index + 3]);
+    const block = (a << 18) | (b << 12) | ((c < 0 ? 0 : c) << 6) | (d < 0 ? 0 : d);
+    if (outputIndex < bytes.length) bytes[outputIndex++] = (block >> 16) & 255;
+    if (outputIndex < bytes.length) bytes[outputIndex++] = (block >> 8) & 255;
+    if (outputIndex < bytes.length) bytes[outputIndex++] = block & 255;
+  }
+  return bytes.buffer;
 }
 
 // ==========================================
@@ -228,6 +372,14 @@ export default function App() {
 
   const [busy, setBusy] = useState(false);
   const [checkingSession, setCheckingSession] = useState(true);
+  const [notice, setNotice] = useState(null);
+  const [notificationRows, setNotificationRows] = useState([]);
+  const [notificationModal, setNotificationModal] = useState(false);
+  const [profileAvatarUrl, setProfileAvatarUrl] = useState("");
+  const [profileCoverUrl, setProfileCoverUrl] = useState("");
+  const [groupCoverUrl, setGroupCoverUrl] = useState("");
+  const [tripCoverUrl, setTripCoverUrl] = useState("");
+  const [profileModal, setProfileModal] = useState(false);
 
   // ----------------------------------------
   // GROUPS
@@ -236,6 +388,7 @@ export default function App() {
   const [groups, setGroups] = useState([]);
   const [activeGroup, setActiveGroup] = useState(null);
   const [members, setMembers] = useState([]);
+  const [groupExpenses, setGroupExpenses] = useState([]);
 
   const [groupName, setGroupName] = useState("");
   const [joinCode, setJoinCode] = useState("");
@@ -317,7 +470,7 @@ export default function App() {
       !SUPABASE_URL.startsWith("https://") ||
       !SUPABASE_PUBLISHABLE_KEY
     ) {
-      Alert.alert(
+      showAlert(
         "Supabase Error",
         "กรุณาตรวจสอบ Supabase URL และ Publishable Key"
       );
@@ -328,6 +481,129 @@ export default function App() {
     return true;
   };
 
+  const showAlert = (title, message, actions) => {
+    setNotice({
+      title: title || "TripBuddies",
+      message: String(message || ""),
+      actions: Array.isArray(actions) ? actions : null,
+    });
+  };
+
+  const uploadImageAsset = async (asset, category) => {
+    let body;
+    if (asset.file && typeof asset.file.arrayBuffer === "function") {
+      body = asset.file;
+    } else if (asset.base64) {
+      body = decodeBase64(asset.base64);
+    } else {
+      const response = await fetch(asset.uri);
+      if (!response.ok) throw new Error("อ่านไฟล์รูปภาพไม่สำเร็จ");
+      body = await response.arrayBuffer();
+    }
+    const bodyLength = body?.byteLength ?? body?.size;
+    if (!body || !bodyLength) {
+      throw new Error("ไฟล์รูปภาพว่าง กรุณาเลือกรูปใหม่");
+    }
+    const extension = (asset.mimeType || "image/jpeg").split("/")[1] || "jpg";
+    const objectPath = `${userId}/${category}/${Date.now()}-${Math.floor(Math.random() * 100000)}.${extension}`;
+    const { error } = await supabase.storage
+      .from("images")
+      .upload(objectPath, body, {
+        contentType: asset.mimeType || "image/jpeg",
+        upsert: true,
+      });
+    if (error) throw error;
+    const { data } = supabase.storage.from("images").getPublicUrl(objectPath);
+    return data.publicUrl;
+  };
+
+  const pickAndUploadImage = async (category) => {
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (permission.status !== "granted") {
+        showAlert("ต้องอนุญาตเข้าถึงรูปภาพ", "อนุญาตให้ TripBuddies เข้าถึงคลังรูปภาพเพื่ออัปโหลดรูป");
+        return;
+      }
+      const selection = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsEditing: true,
+        quality: 0.85,
+        base64: true,
+      });
+      if (selection.canceled || !selection.assets?.[0]) return;
+
+      setBusy(true);
+      const url = await uploadImageAsset(selection.assets[0], category);
+      if (category === "avatar") {
+        setProfileAvatarUrl(url);
+        const { error } = await supabase.from("profiles").upsert({
+          id: userId,
+          avatar_url: url,
+        });
+        if (error) throw error;
+      } else if (category === "profile-cover") {
+        setProfileCoverUrl(url);
+        const { error } = await supabase.from("profiles").upsert({
+          id: userId,
+          cover_url: url,
+        });
+        if (error) throw error;
+      } else if (category === "group-cover") {
+        setGroupCoverUrl(url);
+      } else if (category === "trip-cover") {
+        setTripCoverUrl(url);
+      } else if (category === "qr") {
+        setQrImageUri(url);
+        setQrImageBase64("");
+      }
+      showAlert("อัปโหลดสำเร็จ", "บันทึกรูปภาพขึ้นคลัง TripBuddies แล้ว");
+    } catch (error) {
+      showAlert("อัปโหลดรูปไม่สำเร็จ", error.message || "กรุณาลองใหม่อีกครั้ง");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const noticeSheet = () => (
+    <>
+      <Modal
+        visible={!!notice}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setNotice(null)}
+      >
+        <Pressable style={s.sheetOverlay} onPress={() => setNotice(null)}>
+          <Pressable style={s.bottomSheet} onPress={() => {}}>
+            <View style={s.sheetHandle} />
+            <Text style={s.modalTitle}>{notice?.title}</Text>
+            <Text style={s.modalSubtitle}>{notice?.message}</Text>
+            {(notice?.actions || [{ text: "ตกลง" }]).map((action, index) => (
+              <Button
+                key={`${action.text}-${index}`}
+                title={action.text}
+                outline={action.style === "cancel"}
+                onPress={() => {
+                  setNotice(null);
+                  if (action.onPress) action.onPress();
+                }}
+                style={index > 0 ? { marginTop: 8 } : null}
+              />
+            ))}
+          </Pressable>
+        </Pressable>
+      </Modal>
+      <Modal visible={busy} transparent animationType="fade" onRequestClose={() => {}}>
+        <View style={s.loadingOverlay}>
+          <View style={s.loadingCard}>
+            <Duck style={{ width: 116, height: 116 }} />
+            <ActivityIndicator size="small" color={C.pinkDark} />
+            <Text style={s.loadingText}>กำลังบันทึกข้อมูล...</Text>
+          </View>
+        </View>
+      </Modal>
+    </>
+  );
+
   // ========================================
   // 6. LOAD TRIPS
   // ========================================
@@ -337,29 +613,32 @@ export default function App() {
       setTrips([]);
       setTotalBudget(0);
       setTotalSpent(0);
-      return;
+      return [];
     }
 
     const { data, error } = await supabase
       .from("trips")
-      .select("*")
+      .select("id, group_id, name, cover_url, created_by")
       .eq("group_id", groupId)
-      .order("created_at", {
-        ascending: false,
-      });
+      .order("name", { ascending: true });
 
     if (error) {
       console.log("Load trips error:", error.message);
 
-      Alert.alert(
+      showAlert(
         "โหลดทริปไม่สำเร็จ",
         error.message
       );
 
-      return;
+      return [];
     }
 
-    const tripList = data || [];
+    const tripList = (data || []).map((trip) => ({
+      ...trip,
+      title: trip.name,
+      destination: "",
+      budget: 0,
+    }));
 
     setTrips(tripList);
 
@@ -373,7 +652,7 @@ export default function App() {
 
     if (tripList.length === 0) {
       setTotalSpent(0);
-      return;
+      return tripList;
     }
 
     const tripIds = tripList.map(
@@ -392,7 +671,7 @@ export default function App() {
         expenseError.message
       );
 
-      return;
+      return tripList;
     }
 
     const spent = (expenses || []).reduce(
@@ -402,6 +681,7 @@ export default function App() {
     );
 
     setTotalSpent(spent);
+    return tripList;
   };
 
   // ========================================
@@ -423,7 +703,7 @@ export default function App() {
         error.message
       );
 
-      Alert.alert(
+      showAlert(
         "โหลดกลุ่มไม่สำเร็จ",
         error.message
       );
@@ -442,6 +722,7 @@ export default function App() {
       setTrips([]);
       setTotalBudget(0);
       setTotalSpent(0);
+      setGroupExpenses([]);
 
       return [];
     }
@@ -449,11 +730,9 @@ export default function App() {
     const { data: groupData, error: groupError } =
       await supabase
         .from("groups")
-        .select("*")
+        .select("id, name, invite_code, cover_url, created_by")
         .in("id", groupIds)
-        .order("created_at", {
-          ascending: false,
-        });
+        .order("name", { ascending: true });
 
     if (groupError) {
       console.log(
@@ -461,7 +740,7 @@ export default function App() {
         groupError.message
       );
 
-      Alert.alert(
+      showAlert(
         "โหลดข้อมูลกลุ่มไม่สำเร็จ",
         groupError.message
       );
@@ -491,21 +770,21 @@ export default function App() {
   const loadMembers = async (groupId) => {
     if (!groupId) {
       setMembers([]);
-      return;
+      return [];
     }
 
     const { data, error } = await supabase
       .from("group_members")
-      .select("user_id, role, joined_at")
+      .select("id, group_id, user_id, role")
       .eq("group_id", groupId);
 
     if (error) {
-      Alert.alert(
+      showAlert(
         "โหลดสมาชิกไม่สำเร็จ",
         error.message
       );
 
-      return;
+      return [];
     }
 
     const userIds = (data || []).map(
@@ -514,13 +793,13 @@ export default function App() {
 
     if (userIds.length === 0) {
       setMembers([]);
-      return;
+      return [];
     }
 
     const { data: profiles, error: profileError } =
       await supabase
         .from("profiles")
-        .select("id, full_name, phone")
+        .select("id, full_name, email, phone, avatar_url, cover_url, qr_code_url, currency")
         .in("id", userIds);
 
     if (profileError) {
@@ -534,33 +813,13 @@ export default function App() {
       setMemberQrMap((prev) => {
         const next = { ...prev };
         profiles.forEach((p) => {
-          if (p.phone) {
-            try {
-              if (p.phone.startsWith("{")) {
-                const parsed = JSON.parse(p.phone);
-                next[p.id] = {
-                  ...next[p.id],
-                  promptpay: parsed.promptpay || parsed.phone || "",
-                  bankName: parsed.bankName || "",
-                  accountName: parsed.accountName || "",
-                  qrUri: parsed.qr || "",
-                  base64: parsed.qr || "",
-                };
-              } else if (!next[p.id]?.promptpay) {
-                next[p.id] = {
-                  ...next[p.id],
-                  promptpay: p.phone,
-                };
-              }
-            } catch {
-              if (!next[p.id]?.promptpay) {
-                next[p.id] = {
-                  ...next[p.id],
-                  promptpay: p.phone,
-                };
-              }
-            }
-          }
+          next[p.id] = {
+            ...next[p.id],
+            promptpay: p.phone || next[p.id]?.promptpay || "",
+            accountName: p.full_name || "",
+            qrUri: p.qr_code_url || next[p.id]?.qrUri || "",
+            base64: "",
+          };
         });
         return next;
       });
@@ -576,6 +835,7 @@ export default function App() {
     );
 
     setMembers(result);
+    return result;
   };
 
   // ========================================
@@ -587,8 +847,15 @@ export default function App() {
 
     setActiveGroup(group);
 
-    await loadMembers(group.id);
-    await loadTrips(userId, group.id);
+    const loadedMembers = await loadMembers(group.id);
+    const loadedTrips = await loadTrips(userId, group.id);
+    await loadGroupExpenses(group.id);
+    if (expenseModal) {
+      setExpenseParticipants((loadedMembers || []).map((member) => member.user_id));
+      setExpensePayer(userId);
+      setExpenseTripId(loadedTrips?.[0]?.id || null);
+    }
+    return loadedTrips || [];
   };
 
   // ========================================
@@ -597,7 +864,7 @@ export default function App() {
 
   const createGroup = async () => {
     if (!groupName.trim()) {
-      Alert.alert(
+      showAlert(
         "ข้อมูลไม่ครบ",
         "กรุณากรอกชื่อกลุ่ม"
       );
@@ -612,6 +879,7 @@ export default function App() {
         "create_group",
         {
           p_name: groupName.trim(),
+          p_cover_url: groupCoverUrl || null,
         }
       );
 
@@ -628,14 +896,15 @@ export default function App() {
       }
 
       setGroupName("");
+      setGroupCoverUrl("");
       setGroupModal(false);
 
-      Alert.alert(
+      showAlert(
         "สำเร็จ!",
         "สร้างกลุ่มเรียบร้อยแล้ว"
       );
     } catch (error) {
-      Alert.alert(
+      showAlert(
         "สร้างกลุ่มไม่สำเร็จ",
         error.message
       );
@@ -650,7 +919,7 @@ export default function App() {
 
   const joinGroup = async () => {
     if (!joinCode.trim()) {
-      Alert.alert(
+      showAlert(
         "ข้อมูลไม่ครบ",
         "กรุณากรอกรหัสเชิญ"
       );
@@ -664,7 +933,7 @@ export default function App() {
       const { data, error } = await supabase.rpc(
         "join_group_by_code",
         {
-          p_invite_code: joinCode.trim(),
+          p_code: joinCode.trim(),
         }
       );
 
@@ -682,12 +951,12 @@ export default function App() {
 
       setJoinCode("");
 
-      Alert.alert(
+      showAlert(
         "สำเร็จ!",
         "เข้าร่วมกลุ่มเรียบร้อยแล้ว"
       );
     } catch (error) {
-      Alert.alert(
+      showAlert(
         "เข้าร่วมกลุ่มไม่สำเร็จ",
         error.message
       );
@@ -696,13 +965,61 @@ export default function App() {
     }
   };
 
+  const copyInviteCode = async () => {
+    if (!activeGroup?.invite_code) return;
+    try {
+      await Clipboard.setStringAsync(String(activeGroup.invite_code));
+      showAlert("สำเร็จ", "คัดลอกรหัสกลุ่มสำเร็จ!");
+    } catch (error) {
+      showAlert("คัดลอกรหัสไม่สำเร็จ", error.message);
+    }
+  };
+
+  const confirmGroupExit = () => {
+    if (!activeGroup) return;
+    const isCreator = activeGroup.created_by === userId || activeGroup.role === "owner";
+    showAlert(
+      isCreator ? "ลบกลุ่มนี้หรือไม่?" : "ออกจากกลุ่มนี้หรือไม่?",
+      isCreator
+        ? "การลบกลุ่มจะนำกลุ่มและข้อมูลที่เกี่ยวข้องออกตามกติกาความปลอดภัยของระบบ"
+        : "คุณสามารถเข้าร่วมกลุ่มอีกครั้งด้วยรหัสเชิญ",
+      [
+        { text: "ยกเลิก", style: "cancel" },
+        {
+          text: isCreator ? "ลบกลุ่ม" : "ออกจากกลุ่ม",
+          onPress: async () => {
+            setGroupActionBusy(true);
+            try {
+              const { error } = await supabase.rpc(
+                isCreator ? "delete_group_safe" : "leave_group_safe",
+                { p_group_id: activeGroup.id }
+              );
+              if (error) throw error;
+              const updatedGroups = await loadGroups(userId);
+              setActiveGroup(null);
+              setMembers([]);
+              setTrips([]);
+              setGroupExpenses([]);
+              if (updatedGroups.length) await selectGroup(updatedGroups[0]);
+              showAlert("สำเร็จ", isCreator ? "ลบกลุ่มเรียบร้อยแล้ว" : "ออกจากกลุ่มเรียบร้อยแล้ว");
+            } catch (error) {
+              showAlert(isCreator ? "ลบกลุ่มไม่สำเร็จ" : "ออกจากกลุ่มไม่สำเร็จ", error.message);
+            } finally {
+              setGroupActionBusy(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   // ========================================
   // 12. ADD MEMBER BY EMAIL
   // ========================================
 
   const addMember = async () => {
     if (!activeGroup) {
-      Alert.alert(
+      showAlert(
         "ยังไม่ได้เลือกกลุ่ม",
         "กรุณาเลือกกลุ่มก่อน"
       );
@@ -711,7 +1028,7 @@ export default function App() {
     }
 
     if (!memberEmail.trim()) {
-      Alert.alert(
+      showAlert(
         "ข้อมูลไม่ครบ",
         "กรุณากรอกอีเมลสมาชิก"
       );
@@ -736,12 +1053,12 @@ export default function App() {
 
       await loadMembers(activeGroup.id);
 
-      Alert.alert(
+      showAlert(
         "สำเร็จ!",
         "เพิ่มสมาชิกเรียบร้อยแล้ว"
       );
     } catch (error) {
-      Alert.alert(
+      showAlert(
         "เพิ่มสมาชิกไม่สำเร็จ",
         error.message
       );
@@ -760,7 +1077,7 @@ export default function App() {
 
     const { data, error } = await supabase
       .from("profiles")
-      .select("*")
+      .select("id, full_name, email, phone, avatar_url, cover_url, qr_code_url, currency")
       .eq("id", user.id)
       .maybeSingle();
 
@@ -778,13 +1095,19 @@ export default function App() {
       "";
 
     setName(resolvedName);
+    setProfileAvatarUrl(data?.avatar_url || "");
+    setProfileCoverUrl(data?.cover_url || "");
 
     if (resolvedName) {
       try {
         await supabase.from("profiles").upsert({
           id: user.id,
           full_name: resolvedName,
+          email: user.email || "",
           phone: data?.phone || user.user_metadata?.phone || phone || "",
+          avatar_url: data?.avatar_url || null,
+          cover_url: data?.cover_url || null,
+          qr_code_url: data?.qr_code_url || null,
           currency: currency.includes("USD") ? "USD" : "THB",
         });
       } catch (err) {
@@ -801,23 +1124,17 @@ export default function App() {
       }
     } catch {}
 
-    let extractedPhone = data?.phone || "";
-    if (data?.phone) {
-      try {
-        if (data.phone.startsWith("{")) {
-          const parsed = JSON.parse(data.phone);
-          const combined = {
-            promptpay: parsed.promptpay || parsed.phone || "",
-            bankName: parsed.bankName || "",
-            accountName: parsed.accountName || "",
-            qrUri: parsed.qr || "",
-            base64: parsed.qr || "",
-          };
-          setUserQrData((prev) => prev || combined);
-          setMemberQrMap((prev) => ({ ...prev, [user.id]: combined }));
-          extractedPhone = parsed.promptpay || parsed.phone || "";
-        }
-      } catch {}
+    const extractedPhone = data?.phone || "";
+    if (data?.qr_code_url || extractedPhone) {
+      const qr = {
+        promptpay: extractedPhone,
+        bankName: "",
+        accountName: resolvedName,
+        qrUri: data?.qr_code_url || "",
+        base64: "",
+      };
+      setUserQrData(qr);
+      setMemberQrMap((prev) => ({ ...prev, [user.id]: qr }));
     }
 
     setPhone(extractedPhone);
@@ -837,12 +1154,20 @@ export default function App() {
 
       await loadMembers(firstGroup.id);
       await loadTrips(user.id, firstGroup.id);
+      await loadGroupExpenses(firstGroup.id);
     } else {
       setActiveGroup(null);
       setMembers([]);
       setTrips([]);
       setTotalBudget(0);
       setTotalSpent(0);
+      setGroupExpenses([]);
+    }
+
+    try {
+      await loadNotifications(user.id);
+    } catch (notificationError) {
+      console.log("Load notifications error:", notificationError.message);
     }
 
     setTab("home");
@@ -978,7 +1303,7 @@ export default function App() {
     if (!checkSupabase()) return;
 
     if (!email.trim() || !password) {
-      Alert.alert(
+      showAlert(
         "ข้อมูลไม่ครบ",
         "กรุณากรอกอีเมลและรหัสผ่าน"
       );
@@ -1004,7 +1329,7 @@ export default function App() {
 
       await loadUserData(data.user);
     } catch (error) {
-      Alert.alert(
+      showAlert(
         "เข้าสู่ระบบไม่สำเร็จ",
         error.message
       );
@@ -1028,7 +1353,7 @@ export default function App() {
       !password ||
       !confirm
     ) {
-      Alert.alert(
+      showAlert(
         "ข้อมูลไม่ครบ",
         "กรุณากรอกข้อมูลให้ครบทุกช่อง"
       );
@@ -1037,7 +1362,7 @@ export default function App() {
     }
 
     if (password.length < 6) {
-      Alert.alert(
+      showAlert(
         "รหัสผ่านสั้นเกินไป",
         "กรุณาใช้รหัสผ่านอย่างน้อย 6 ตัวอักษร"
       );
@@ -1046,7 +1371,7 @@ export default function App() {
     }
 
     if (password !== confirm) {
-      Alert.alert(
+      showAlert(
         "รหัสผ่านไม่ตรงกัน",
         "กรุณากรอกรหัสผ่านให้ตรงกัน"
       );
@@ -1123,7 +1448,7 @@ export default function App() {
             }
           }
 
-          Alert.alert(
+          showAlert(
             "สมัครสมาชิกสำเร็จ",
             "สร้างบัญชีเรียบร้อยแล้ว เข้าสู่ระบบได้ทันที",
             [
@@ -1152,12 +1477,12 @@ export default function App() {
           return;
         }
 
-        Alert.alert(
+        showAlert(
           "สมัครสมาชิกล่าช้า (Email Rate Limit)",
           "ระบบส่งอีเมลของ Supabase ถึงลิมิตฟรี แนะนำให้เข้าไปปิด 'Confirm email' ใน Supabase Dashboard (Auth > Providers > Email) เพื่อให้สมัครแล้วเข้าได้ทันที 100% โดยไม่ต้องส่งอีเมลครับ"
         );
       } else {
-        Alert.alert(
+        showAlert(
           "สมัครสมาชิกไม่สำเร็จ",
           error.message
         );
@@ -1175,7 +1500,7 @@ export default function App() {
     const { error } = await supabase.auth.signOut();
 
     if (error) {
-      Alert.alert(
+      showAlert(
         "ออกจากระบบไม่สำเร็จ",
         error.message
       );
@@ -1187,13 +1512,40 @@ export default function App() {
     setTab("home");
   };
 
+  const saveProfileData = async () => {
+    if (!name.trim()) {
+      showAlert("ข้อมูลไม่ครบ", "กรุณากรอกชื่อของคุณ");
+      return;
+    }
+    setBusy(true);
+    try {
+      const { error } = await supabase.from("profiles").upsert({
+        id: userId,
+        full_name: name.trim(),
+        email: email.trim(),
+        phone: phone.trim(),
+        avatar_url: profileAvatarUrl || null,
+        cover_url: profileCoverUrl || null,
+        qr_code_url: userQrData?.qrUri || null,
+        currency: currency.includes("USD") ? "USD" : "THB",
+      });
+      if (error) throw error;
+      setProfileModal(false);
+      showAlert("สำเร็จ", "บันทึกข้อมูลโปรไฟล์เรียบร้อยแล้ว");
+    } catch (error) {
+      showAlert("บันทึกโปรไฟล์ไม่สำเร็จ", error.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // ========================================
   // 20. CREATE TRIP
   // ========================================
 
   const createTrip = () => {
     if (!userId) {
-      Alert.alert(
+      showAlert(
         "กรุณาเข้าสู่ระบบ",
         "ต้องเข้าสู่ระบบก่อนสร้างทริป"
       );
@@ -1202,7 +1554,7 @@ export default function App() {
     }
 
     if (!activeGroup) {
-      Alert.alert(
+      showAlert(
         "ต้องสร้างกลุ่มก่อน",
         "กรุณาสร้างกลุ่มหรือเข้าร่วมกลุ่มก่อน จึงจะสามารถสร้างทริปได้",
         [
@@ -1223,6 +1575,7 @@ export default function App() {
     setTripTitle("");
     setTripDestination("");
     setTripBudget("");
+    setTripCoverUrl("");
 
     setTripModal(true);
   };
@@ -1233,7 +1586,7 @@ export default function App() {
 
   const saveTrip = async () => {
     if (!activeGroup) {
-      Alert.alert(
+      showAlert(
         "ไม่พบกลุ่ม",
         "กรุณาเลือกกลุ่มก่อนสร้างทริป"
       );
@@ -1242,7 +1595,7 @@ export default function App() {
     }
 
     if (!tripTitle.trim()) {
-      Alert.alert(
+      showAlert(
         "ข้อมูลไม่ครบ",
         "กรุณากรอกชื่อทริป"
       );
@@ -1256,12 +1609,8 @@ export default function App() {
       const { error } = await supabase
         .from("trips")
         .insert({
-          title: tripTitle.trim(),
-          destination: tripDestination.trim(),
-          budget: 0,
-          currency: currency.includes("USD")
-            ? "USD"
-            : "THB",
+          name: tripTitle.trim(),
+          cover_url: tripCoverUrl || null,
           created_by: userId,
           group_id: activeGroup.id,
         });
@@ -1269,15 +1618,17 @@ export default function App() {
       if (error) throw error;
 
       setTripModal(false);
+      setTripCoverUrl("");
 
       await loadTrips(userId, activeGroup.id);
+      await loadGroupExpenses(activeGroup.id);
 
-      Alert.alert(
+      showAlert(
         "สำเร็จ!",
         "บันทึกทริปลงในกลุ่มเรียบร้อยแล้ว"
       );
     } catch (error) {
-      Alert.alert(
+      showAlert(
         "สร้างทริปไม่สำเร็จ",
         error.message
       );
@@ -1298,39 +1649,12 @@ export default function App() {
   // ----------------------------------------
 
   const parseExpense = (exp) => {
-    let title = "ค่าใช้จ่าย";
-    let payer = exp?.paid_by;
-    let participants = [];
-    let splitType = "equal";
-    let items = [];
-    let notes = "";
-    if (exp?.description) {
-      try {
-        if (exp.description.startsWith("{")) {
-          const parsed = JSON.parse(exp.description);
-          title = parsed.title || parsed.name || exp.description;
-          if (parsed.payer) {
-            payer = parsed.payer;
-          }
-          participants = Array.isArray(parsed.participants) ? parsed.participants : [];
-          splitType = parsed.splitType || (parsed.items?.length > 0 ? "itemized" : "equal");
-          items = Array.isArray(parsed.items) ? parsed.items : [];
-          notes = parsed.notes || "";
-        } else {
-          title = exp.description;
-        }
-      } catch {
-        title = exp.description;
-      }
-    }
     return {
       ...exp,
-      title,
-      paid_by: payer,
-      participants,
-      splitType,
-      items,
-      notes,
+      title: exp.title || "ค่าใช้จ่าย",
+      participants: Array.isArray(exp.split_between) ? exp.split_between : [],
+      splitType: Array.isArray(exp.items) && exp.items.length ? "itemized" : "equal",
+      items: Array.isArray(exp.items) ? exp.items : [],
     };
   };
 
@@ -1378,7 +1702,7 @@ export default function App() {
 
     setEditingMember(null);
     setEditingNickInput("");
-    Alert.alert("สำเร็จ", `ตั้งชื่อ "${clean}" เรียบร้อยแล้ว`);
+    showAlert("สำเร็จ", `ตั้งชื่อ "${clean}" เรียบร้อยแล้ว`);
   };
 
   // ----------------------------------------
@@ -1398,35 +1722,7 @@ export default function App() {
     setQrSetupModal(true);
   };
 
-  const pickQrImage = async () => {
-    try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== "granted") {
-        Alert.alert(
-          "ขอสิทธิ์เข้าถึงรูปภาพ",
-          "กรุณาอนุญาตให้แอปเข้าถึงคลังรูปภาพเพื่อเลือกรูป QR Code"
-        );
-        return;
-      }
-
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ["images"],
-        allowsEditing: true,
-        quality: 0.6,
-        base64: true,
-      });
-
-      if (!result.canceled && result.assets && result.assets.length > 0) {
-        const asset = result.assets[0];
-        setQrImageUri(asset.uri);
-        const b64 = asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
-        setQrImageBase64(b64);
-      }
-    } catch (err) {
-      console.log("Pick image error:", err);
-      Alert.alert("ไม่สามารถเลือกรูปได้", err.message || "เกิดข้อผิดพลาด");
-    }
-  };
+  const pickQrImage = () => pickAndUploadImage("qr");
 
   const saveQrData = async () => {
     if (!qrSetupTarget) return;
@@ -1435,7 +1731,7 @@ export default function App() {
 
     const cleanPromptPay = qrInputPromptPay.trim();
     if (!cleanPromptPay && !qrImageBase64 && !qrImageUri) {
-      Alert.alert(
+      showAlert(
         "ข้อมูลไม่ครบ",
         "กรุณากรอกเบอร์พร้อมเพย์ หรืออัปโหลดรูป QR Code"
       );
@@ -1449,7 +1745,7 @@ export default function App() {
         bankName: qrInputBankName.trim(),
         accountName: qrInputAccountName.trim(),
         qrUri: qrImageUri || "",
-        base64: qrImageBase64 || "",
+        base64: "",
         updatedAt: new Date().toISOString(),
       };
 
@@ -1466,36 +1762,18 @@ export default function App() {
       }
       await AsyncStorage.setItem("@tb_member_qr_map", JSON.stringify(updatedMap));
 
-      // Sync to profiles table in Supabase
-      try {
-        const payloadToStore = JSON.stringify({
-          promptpay: cleanPromptPay,
-          bankName: qrInputBankName.trim(),
-          accountName: qrInputAccountName.trim(),
-          qr: qrImageBase64 || qrImageUri || "",
-        });
-
-        const { error } = await supabase.from("profiles").upsert({
-          id: tUid,
-          full_name: tName,
-          phone: payloadToStore,
-        });
-
-        if (error) {
-          await supabase.from("profiles").upsert({
-            id: tUid,
-            full_name: tName,
-            phone: cleanPromptPay,
-          });
-        }
-      } catch (e) {
-        console.log("Sync QR to supabase error:", e);
-      }
+      const { error } = await supabase.from("profiles").upsert({
+        id: tUid,
+        full_name: tName,
+        phone: cleanPromptPay,
+        qr_code_url: qrImageUri || null,
+      });
+      if (error) throw error;
 
       setQrSetupModal(false);
-      Alert.alert("สำเร็จ!", `บันทึกข้อมูล QR Code ของ ${tName} เรียบร้อยแล้ว`);
+      showAlert("สำเร็จ!", `บันทึกข้อมูล QR Code ของ ${tName} เรียบร้อยแล้ว`);
     } catch (err) {
-      Alert.alert("บันทึกไม่สำเร็จ", err.message || "เกิดข้อผิดพลาด");
+      showAlert("บันทึกไม่สำเร็จ", err.message || "เกิดข้อผิดพลาด");
     } finally {
       setBusy(false);
     }
@@ -1503,7 +1781,7 @@ export default function App() {
 
   const removeQrData = async (targetUserId) => {
     const tUid = targetUserId || userId;
-    Alert.alert("ยืนยัน", "ต้องการลบ QR Code และข้อมูลการรับเงินหรือไม่?", [
+    showAlert("ยืนยัน", "ต้องการลบ QR Code และข้อมูลการรับเงินหรือไม่?", [
       { text: "ยกเลิก", style: "cancel" },
       {
         text: "ลบข้อมูล",
@@ -1518,12 +1796,17 @@ export default function App() {
           }
           await AsyncStorage.setItem("@tb_member_qr_map", JSON.stringify(updated));
           try {
-            await supabase.from("profiles").upsert({
+            const { error } = await supabase.from("profiles").upsert({
               id: tUid,
               phone: "",
+              qr_code_url: null,
             });
-          } catch {}
-          Alert.alert("สำเร็จ", "ลบข้อมูล QR Code เรียบร้อยแล้ว");
+            if (error) throw error;
+          } catch (error) {
+            showAlert("ลบข้อมูลไม่สำเร็จ", error.message);
+            return;
+          }
+          showAlert("สำเร็จ", "ลบข้อมูล QR Code เรียบร้อยแล้ว");
         },
       },
     ]);
@@ -1547,7 +1830,7 @@ export default function App() {
 
   const removeExpenseSubItem = (itemId) => {
     if (expenseItems.length <= 1) {
-      Alert.alert("แจ้งเตือน", "ต้องมีรายการอาหารอย่างน้อย 1 เมนู");
+      showAlert("แจ้งเตือน", "ต้องมีรายการอาหารอย่างน้อย 1 เมนู");
       return;
     }
     setExpenseItems((prev) => prev.filter((item) => item.id !== itemId));
@@ -1604,6 +1887,7 @@ export default function App() {
     });
 
     expensesList.forEach((exp) => {
+      if (exp.is_settled) return;
       const amt = Number(exp.amount) || 0;
       if (amt <= 0) return;
 
@@ -1702,25 +1986,114 @@ export default function App() {
     return { net, paidTotals, owedTotals, transfers };
   };
 
+  const loadGroupExpenses = async (groupId) => {
+    if (!groupId) {
+      setGroupExpenses([]);
+      return;
+    }
+    const { data, error } = await supabase
+      .from("expenses")
+      .select("id, group_id, trip_id, title, amount, paid_by, split_between, slip_url, is_settled")
+      .eq("group_id", groupId);
+    if (error) throw error;
+    const expenseRows = data || [];
+    const ids = expenseRows.map((expense) => expense.id);
+    let items = [];
+    if (ids.length) {
+      const { data: itemRows, error: itemError } = await supabase
+        .from("expense_items")
+        .select("id, expense_id, name, amount, participants")
+        .in("expense_id", ids);
+      if (itemError) throw itemError;
+      items = itemRows || [];
+    }
+    setGroupExpenses(expenseRows.map((expense) =>
+      parseExpense({
+        ...expense,
+        items: items.filter((item) => item.expense_id === expense.id),
+      })
+    ));
+  };
+
+  const loadNotifications = async (uid) => {
+    if (!uid) return;
+    const { data, error } = await supabase
+      .from("notifications")
+      .select("id, user_id, title, message, type, is_read, created_at")
+      .eq("user_id", uid)
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    setNotificationRows(data || []);
+    return data || [];
+  };
+
+  const notifyExpenseParticipants = async (expenseTitle, amount, participantIds) => {
+    const recipients = Array.from(new Set(participantIds))
+      .filter((recipientId) => recipientId !== userId);
+    if (!recipients.length) return;
+    const { error } = await supabase.from("notifications").insert(
+      recipients.map((recipientId) => ({
+        user_id: recipientId,
+        title: "มีบิลใหม่ในกลุ่ม",
+        message: `${name || "เพื่อน"} เพิ่ม "${expenseTitle}" ยอด ฿${Number(amount).toLocaleString()}`,
+        type: "expense_created",
+        is_read: false,
+      }))
+    );
+    if (error) throw error;
+  };
+
+  const openNotifications = async () => {
+    try {
+      const currentNotifications = await loadNotifications(userId);
+      const unreadIds = currentNotifications.filter((item) => !item.is_read).map((item) => item.id);
+      if (unreadIds.length) {
+        const { error } = await supabase
+          .from("notifications")
+          .update({ is_read: true })
+          .in("id", unreadIds)
+          .eq("user_id", userId);
+        if (error) throw error;
+        setNotificationRows((current) => current.map((item) => ({ ...item, is_read: true })));
+      }
+      setNotificationModal(true);
+    } catch (error) {
+      showAlert("โหลดการแจ้งเตือนไม่สำเร็จ", error.message);
+    }
+  };
+
   const loadTripExpenses = async (tripId) => {
     if (!tripId) return;
     setLoadingExpenses(true);
     try {
       const { data, error } = await supabase
         .from("expenses")
-        .select("id, trip_id, amount, paid_by, description, created_at")
+        .select("id, group_id, trip_id, title, amount, paid_by, split_between, slip_url, is_settled")
         .eq("trip_id", tripId)
-        .order("created_at", { ascending: false });
 
       if (error) {
-        console.log("Load expenses error:", error.message);
-        return;
+        throw error;
       }
 
-      const parsed = (data || []).map(parseExpense);
+      const expenseIds = (data || []).map((expense) => expense.id);
+      let items = [];
+      if (expenseIds.length) {
+        const itemResult = await supabase
+          .from("expense_items")
+          .select("id, expense_id, name, amount, participants")
+          .in("expense_id", expenseIds);
+        if (itemResult.error) throw itemResult.error;
+        items = itemResult.data || [];
+      }
+      const parsed = (data || []).map((expense) =>
+        parseExpense({
+          ...expense,
+          items: items.filter((item) => item.expense_id === expense.id),
+        })
+      );
       setTripExpenses(parsed);
     } catch (err) {
-      console.log("Error loading expenses:", err);
+      showAlert("โหลดรายการค่าใช้จ่ายไม่สำเร็จ", err.message || "กรุณาลองใหม่");
     } finally {
       setLoadingExpenses(false);
     }
@@ -1739,12 +2112,12 @@ export default function App() {
     const tid = targetTripId || selectedTrip?.id || (trips[0] && trips[0].id);
     if (!tid) {
       if (!activeGroup) {
-        Alert.alert("ยังไม่ได้เลือกกลุ่ม", "กรุณาเลือกหรือสร้างกลุ่มก่อนบันทึกค่าใช้จ่าย", [
+        showAlert("ยังไม่ได้เลือกกลุ่ม", "กรุณาเลือกหรือสร้างกลุ่มก่อนบันทึกค่าใช้จ่าย", [
           { text: "ไปหน้ากลุ่ม", onPress: () => nav("groups") },
           { text: "ยกเลิก", style: "cancel" },
         ]);
       } else {
-        Alert.alert("ยังไม่มีทริป", "กรุณาสร้างทริปแรกในกลุ่มก่อนบันทึกค่าใช้จ่าย", [
+        showAlert("ยังไม่มีทริป", "กรุณาสร้างทริปแรกในกลุ่มก่อนบันทึกค่าใช้จ่าย", [
           { text: "+ สร้างทริป", onPress: createTrip },
           { text: "ยกเลิก", style: "cancel" },
         ]);
@@ -1790,15 +2163,16 @@ export default function App() {
         }
         if (activeGroup) {
           await loadTrips(userId, activeGroup.id);
+          await loadGroupExpenses(activeGroup.id);
         }
 
-        Alert.alert("สำเร็จ", "ลบรายการเรียบร้อยแล้ว");
+        showAlert("สำเร็จ", "ลบรายการเรียบร้อยแล้ว");
       } catch (err) {
         console.log("Delete expense error:", err);
         if (selectedTrip) {
           await loadTripExpenses(selectedTrip.id);
         }
-        Alert.alert(
+        showAlert(
           "ลบไม่สำเร็จ",
           err.message || "ไม่สามารถลบรายการได้ กรุณาตรวจสอบสิทธิ์ใน Supabase"
         );
@@ -1807,21 +2181,109 @@ export default function App() {
       }
     };
 
-    if (Platform.OS === "web") {
-      if (typeof window !== "undefined" && window.confirm) {
-        const confirmed = window.confirm(
-          `ต้องการลบรายการ "${expTitle || "นี้"}" หรือไม่?`
-        );
-        if (confirmed) {
-          doDelete();
-        }
-      } else {
-        doDelete();
-      }
-      return;
-    }
+    const settleExpense = (expense) => {
+      showAlert(
+        "ยืนยันเคลียร์รายการ",
+        `ทำเครื่องหมายว่ารายการ "${expense.title}" จำนวน ฿${Number(expense.amount).toLocaleString()} เคลียร์ครบแล้วหรือไม่?`,
+        [
+          { text: "ยกเลิก", style: "cancel" },
+          {
+            text: "เคลียร์ยอด",
+            onPress: async () => {
+              setBusy(true);
+              try {
+                const { error } = await supabase
+                  .from("expenses")
+                  .update({ is_settled: true })
+                  .eq("id", expense.id)
+                  .eq("group_id", activeGroup.id);
+                if (error) throw error;
+                await loadTripExpenses(expense.trip_id);
+                await loadGroupExpenses(activeGroup.id);
+                showAlert("สำเร็จ", "ทำเครื่องหมายเคลียร์รายการแล้ว");
+              } catch (error) {
+                showAlert("เคลียร์ยอดไม่สำเร็จ", error.message);
+              } finally {
+                setBusy(false);
+              }
+            },
+          },
+        ]
+      );
+    };
 
-    Alert.alert(
+    const settleTransfer = (transfer) => {
+      const pair = [transfer.from, transfer.to];
+      const candidates = groupExpenses.filter((expense) => {
+        if (expense.is_settled || expense.paid_by !== transfer.to) return false;
+        if (expense.items?.length) {
+          return expense.items.every((item) =>
+            item.participants?.length &&
+            item.participants.every((id) => pair.includes(id))
+          ) && expense.items.some((item) => item.participants.includes(transfer.from));
+        }
+        return expense.participants?.includes(transfer.from) &&
+          expense.participants.every((id) => pair.includes(id));
+      });
+      const contribution = (expense) => {
+        if (expense.items?.length) {
+          return expense.items.reduce((sum, item) => {
+            if (!item.participants.includes(transfer.from)) return sum;
+            return sum + Number(item.amount || 0) / item.participants.length;
+          }, 0);
+        }
+        const participants = expense.participants;
+        return Number(expense.amount || 0) / participants.length;
+      };
+      const matched = [];
+      let remaining = transfer.amount;
+      for (const expense of candidates) {
+        const share = contribution(expense);
+        if (share <= remaining + 0.01) {
+          matched.push(expense);
+          remaining -= share;
+        }
+        if (remaining <= 0.01) break;
+      }
+      if (remaining > 0.01) {
+        showAlert(
+          "เคลียร์ยอดแยกไม่ได้",
+          "ยอดนี้มาจากหลายบิลหรือมีการหักลบที่ไม่สามารถแทนด้วยสถานะ is_settled รายบิลได้ กรุณาเคลียร์บิลที่เกี่ยวข้องทีละรายการ"
+        );
+        return;
+      }
+      showAlert(
+        "ยืนยันเคลียร์ยอด",
+        `ทำเครื่องหมาย ${matched.length} บิลที่เกี่ยวข้องว่าเคลียร์แล้วหรือไม่?`,
+        [
+          { text: "ยกเลิก", style: "cancel" },
+          {
+            text: "เคลียร์ยอด",
+            onPress: async () => {
+              setBusy(true);
+              try {
+                const ids = matched.map((expense) => expense.id);
+                const { error } = await supabase
+                  .from("expenses")
+                  .update({ is_settled: true })
+                  .in("id", ids)
+                  .eq("group_id", activeGroup.id);
+                if (error) throw error;
+                await loadGroupExpenses(activeGroup.id);
+                if (selectedTrip) await loadTripExpenses(selectedTrip.id);
+                showAlert("สำเร็จ", "อัปเดตสถานะเคลียร์ยอดเรียบร้อยแล้ว");
+              } catch (error) {
+                showAlert("เคลียร์ยอดไม่สำเร็จ", error.message);
+              } finally {
+                setBusy(false);
+              }
+            },
+          },
+        ]
+      );
+    };
+
+    showAlert(
       "ยืนยันการลบ",
       `ต้องการลบรายการ "${expTitle || "นี้"}" หรือไม่?`,
       [
@@ -1837,7 +2299,7 @@ export default function App() {
 
   const saveExpense = async () => {
     if (!activeGroup || trips.length === 0) {
-      Alert.alert(
+      showAlert(
         "ไม่พบทริป",
         "กรุณาสร้างหรือเลือกทริปในกลุ่มก่อนบันทึกค่าใช้จ่าย"
       );
@@ -1845,42 +2307,40 @@ export default function App() {
     }
 
     if (!expenseTitle.trim()) {
-      Alert.alert("ข้อมูลไม่ครบ", "กรุณาระบุชื่อรายการหรือชื่อร้านอาหาร");
+      showAlert("ข้อมูลไม่ครบ", "กรุณาระบุชื่อรายการหรือชื่อร้านอาหาร");
       return;
     }
 
     const targetTripId = expenseTripId || selectedTrip?.id || (trips[0] && trips[0].id);
     if (!targetTripId) {
-      Alert.alert("ไม่พบทริป", "กรุณาเลือกทริปที่ต้องการบันทึก");
+      showAlert("ไม่พบทริป", "กรุณาเลือกทริปที่ต้องการบันทึก");
       return;
     }
 
     const payer = expensePayer || userId;
     let amt = 0;
-    let payload = {};
-
     if (splitMode === "itemized") {
       if (expenseItems.length === 0) {
-        Alert.alert("ข้อมูลไม่ครบ", "กรุณาเพิ่มอย่างน้อย 1 รายการอาหาร");
+        showAlert("ข้อมูลไม่ครบ", "กรุณาเพิ่มอย่างน้อย 1 รายการอาหาร");
         return;
       }
 
       for (let i = 0; i < expenseItems.length; i++) {
         const it = expenseItems[i];
         if (!it.name.trim()) {
-          Alert.alert("ข้อมูลไม่ครบ", `กรุณาระบุชื่อเมนูสำหรับรายการที่ ${i + 1}`);
+          showAlert("ข้อมูลไม่ครบ", `กรุณาระบุชื่อเมนูสำหรับรายการที่ ${i + 1}`);
           return;
         }
         const itPrice = Number(String(it.amount).replace(/,/g, "")) || 0;
         if (itPrice <= 0) {
-          Alert.alert(
+          showAlert(
             "ราคาไม่ถูกต้อง",
             `กรุณากรอกราคาของเมนู "${it.name.trim()}" มากกว่า 0`
           );
           return;
         }
         if (!it.participants || it.participants.length === 0) {
-          Alert.alert(
+          showAlert(
             "ไม่มีผู้ร่วมหาร",
             `กรุณาเลือกเพื่อนที่กินเมนู "${it.name.trim()}" อย่างน้อย 1 คน`
           );
@@ -1889,72 +2349,64 @@ export default function App() {
         amt += itPrice;
       }
 
-      const allParticipants = Array.from(
-        new Set(expenseItems.flatMap((it) => it.participants))
-      );
-
-      payload = {
-        title: expenseTitle.trim(),
-        payer: payer,
-        participants: allParticipants,
-        splitType: "itemized",
-        items: expenseItems.map((it) => ({
-          id: it.id,
-          name: it.name.trim(),
-          amount: Number(String(it.amount).replace(/,/g, "")) || 0,
-          participants: it.participants,
-        })),
-      };
     } else {
       amt = Number(expenseAmount.replace(/,/g, "")) || 0;
       if (amt <= 0) {
-        Alert.alert(
+        showAlert(
           "จำนวนเงินไม่ถูกต้อง",
           "กรุณากรอกจำนวนเงินมากกว่า 0"
         );
         return;
       }
 
-      const participants =
-        expenseParticipants.length > 0
-          ? expenseParticipants
-          : members.map((m) => m.user_id);
-
-      payload = {
-        title: expenseTitle.trim(),
-        payer: payer,
-        participants,
-        splitType: "equal",
-      };
     }
 
     setBusy(true);
 
     try {
-      let { error } = await supabase.from("expenses").insert({
-        description: JSON.stringify(payload),
+      const { data: createdExpense, error } = await supabase.from("expenses").insert({
+        group_id: activeGroup.id,
+        title: expenseTitle.trim(),
         amount: amt,
         paid_by: payer,
         trip_id: targetTripId,
-      });
-
-      if (
-        error &&
-        (error.code === "42501" ||
-          error.message?.includes("row-level security") ||
-          error.message?.includes("policy"))
-      ) {
-        console.log("RLS policy fallback for payer:", payer);
-        const fallback = await supabase.from("expenses").insert({
-          description: JSON.stringify(payload),
-          amount: amt,
-          paid_by: userId,
-          trip_id: targetTripId,
-        });
-        error = fallback.error;
-      }
+        split_between: splitMode === "itemized"
+          ? Array.from(new Set(expenseItems.flatMap((item) => item.participants)))
+          : (expenseParticipants.length ? expenseParticipants : members.map((member) => member.user_id)),
+        slip_url: null,
+        is_settled: false,
+      }).select("id").single();
 
       if (error) throw error;
+      if (splitMode === "itemized") {
+        const { error: itemError } = await supabase.from("expense_items").insert(
+          expenseItems.map((item) => ({
+            expense_id: createdExpense.id,
+            name: item.name.trim(),
+            amount: Number(String(item.amount).replace(/,/g, "")) || 0,
+            participants: item.participants,
+          }))
+        );
+        if (itemError) {
+          const { error: rollbackError } = await supabase
+            .from("expenses")
+            .delete()
+            .eq("id", createdExpense.id);
+          if (rollbackError) {
+            throw new Error(`${itemError.message}. ลบรายการที่บันทึกค้างไว้ไม่สำเร็จ: ${rollbackError.message}`);
+          }
+          throw itemError;
+        }
+      }
+      let notificationError = null;
+      try {
+        const participantIds = splitMode === "itemized"
+          ? expenseItems.flatMap((item) => item.participants)
+          : expenseParticipants;
+        await notifyExpenseParticipants(expenseTitle.trim(), amt, participantIds);
+      } catch (error) {
+        notificationError = error;
+      }
 
       setExpenseModal(false);
       setExpenseTitle("");
@@ -1965,14 +2417,17 @@ export default function App() {
         await loadTripExpenses(targetTripId);
       }
       await loadTrips(userId, activeGroup.id);
+      await loadGroupExpenses(activeGroup.id);
 
       const targetTrip = trips.find((t) => t.id === targetTripId);
-      Alert.alert(
-        "สำเร็จ!",
-        `บันทึกค่าใช้จ่าย ฿${amt.toLocaleString()} ในทริป "${targetTrip?.title || ""}" เรียบร้อยแล้ว`
+      showAlert(
+        notificationError ? "บันทึกสำเร็จ แต่ส่งแจ้งเตือนไม่สำเร็จ" : "สำเร็จ!",
+        notificationError
+          ? `บันทึกบิลแล้ว แต่สร้างการแจ้งเตือนไม่สำเร็จ: ${notificationError.message}`
+          : `บันทึกค่าใช้จ่าย ฿${amt.toLocaleString()} ในทริป "${targetTrip?.title || ""}" เรียบร้อยแล้ว`
       );
     } catch (error) {
-      Alert.alert("บันทึกไม่สำเร็จ", error.message);
+      showAlert("บันทึกไม่สำเร็จ", error.message);
     } finally {
       setBusy(false);
     }
@@ -2024,7 +2479,7 @@ export default function App() {
                   } else if (trips.length > 0) {
                     openTripDetail(trips[0]);
                   } else if (!activeGroup) {
-                    Alert.alert(
+                    showAlert(
                       "ยังไม่ได้เลือกกลุ่ม",
                       "กรุณาเลือกหรือสร้างกลุ่มก่อนบันทึกค่าใช้จ่าย",
                       [
@@ -2033,7 +2488,7 @@ export default function App() {
                       ]
                     );
                   } else {
-                    Alert.alert(
+                    showAlert(
                       "ยังไม่มีทริป",
                       "กรุณาสร้างทริปแรกในกลุ่มก่อนบันทึกค่าใช้จ่าย",
                       [
@@ -2093,13 +2548,47 @@ export default function App() {
               contentContainerStyle={{ paddingBottom: 10 }}
             >
               <Text style={s.modalTitle}>บันทึกค่าใช้จ่าย</Text>
+              {groups.length > 1 && (
+                <View style={{ marginBottom: 12 }}>
+                  <Text style={s.modalFieldTitle}>เลือกกลุ่ม</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                    {groups.map((group) => {
+                      const selected = activeGroup?.id === group.id;
+                      return (
+                        <TouchableOpacity
+                          key={group.id}
+                          onPress={async () => {
+                            const selectedTrips = await selectGroup(group);
+                            if (!selectedTrips.length) {
+                              setExpenseModal(false);
+                              showAlert(
+                                "กลุ่มนี้ยังไม่มีทริป",
+                                "สร้างทริปก่อนจึงจะบันทึกค่าใช้จ่ายได้",
+                                [
+                                  { text: "สร้างทริป", onPress: createTrip },
+                                  { text: "ยกเลิก", style: "cancel" },
+                                ]
+                              );
+                            }
+                          }}
+                          style={[s.payerChip, selected && s.payerChipActive]}
+                        >
+                          <Text style={[s.payerChipText, selected && s.payerChipTextActive]}>
+                            {group.name}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+              )}
               <Text style={s.modalSubtitle}>
                 {trips.find((t) => t.id === (expenseTripId || selectedTrip?.id || trips[0]?.id))?.title
                   ? `ทริป: ${trips.find((t) => t.id === (expenseTripId || selectedTrip?.id || trips[0]?.id))?.title}`
                   : "บันทึกรายจ่ายสำหรับทริปนี้"}
               </Text>
 
-              {trips.length > 1 && (
+              {trips.length > 0 && (
                 <View style={{ marginBottom: 12 }}>
                   <Text style={s.modalFieldTitle}>เลือกทริป</Text>
                   <ScrollView
@@ -2600,7 +3089,7 @@ export default function App() {
                     <TouchableOpacity
                       style={s.copyMiniBtn}
                       onPress={() => {
-                        Alert.alert("คัดลอกแล้ว", `คัดลอก ${viewingQrModal.promptpay} เรียบร้อยแล้ว`);
+                        showAlert("คัดลอกแล้ว", `คัดลอก ${viewingQrModal.promptpay} เรียบร้อยแล้ว`);
                       }}
                     >
                       <Ionicons name="copy-outline" size={14} color={C.pinkDark} />
@@ -2623,20 +3112,25 @@ export default function App() {
             </Text>
 
             <View style={{ width: "100%", flexDirection: "row", marginTop: 14 }}>
-              <TouchableOpacity
-                style={[s.modalBtnSecondary, { flex: 1, marginRight: 8 }]}
-                onPress={() => {
-                  const target = { ...viewingQrModal };
-                  setViewingQrModal(null);
-                  openQrSetupModal(target.userId, target.name);
-                }}
-              >
-                <Ionicons name="create-outline" size={14} color={C.pinkDark} />
-                <Text style={s.modalBtnSecondaryText}>แก้ไขข้อมูล</Text>
-              </TouchableOpacity>
+              {viewingQrModal?.userId === userId && (
+                <TouchableOpacity
+                  style={[s.modalBtnSecondary, { flex: 1, marginRight: 8 }]}
+                  onPress={() => {
+                    const target = { ...viewingQrModal };
+                    setViewingQrModal(null);
+                    openQrSetupModal(target.userId, target.name);
+                  }}
+                >
+                  <Ionicons name="create-outline" size={14} color={C.pinkDark} />
+                  <Text style={s.modalBtnSecondaryText}>แก้ไขข้อมูล</Text>
+                </TouchableOpacity>
+              )}
 
               <TouchableOpacity
-                style={[s.modalBtnPrimary, { flex: 1, marginLeft: 8 }]}
+                style={[
+                  s.modalBtnPrimary,
+                  { flex: viewingQrModal?.userId === userId ? 1 : 2, marginLeft: viewingQrModal?.userId === userId ? 8 : 0 },
+                ]}
                 onPress={() => setViewingQrModal(null)}
               >
                 <Text style={s.modalBtnPrimaryText}>ปิด</Text>
@@ -2753,6 +3247,44 @@ export default function App() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+      <Modal
+        visible={notificationModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setNotificationModal(false)}
+      >
+        <Pressable style={s.sheetOverlay} onPress={() => setNotificationModal(false)}>
+          <Pressable style={[s.bottomSheet, { maxHeight: "78%" }]} onPress={() => {}}>
+            <View style={s.sheetHandle} />
+            <Text style={s.modalTitle}>การแจ้งเตือน</Text>
+            {notificationRows.length === 0 ? (
+              <View style={s.notificationEmpty}>
+                <Duck style={{ width: 130, height: 130 }} />
+                <Text style={s.emptyTripTitle}>ยังไม่มีการแจ้งเตือนในขณะนี้</Text>
+              </View>
+            ) : (
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {notificationRows.map((item) => (
+                  <View key={item.id} style={[s.notificationRow, !item.is_read && s.notificationUnread]}>
+                    <View style={s.notificationIcon}>
+                      <Ionicons name="notifications-outline" size={18} color={C.pinkDark} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.groupCardTitle}>{item.title}</Text>
+                      <Text style={s.groupCardDesc}>{item.message}</Text>
+                      <Text style={s.notificationDate}>
+                        {new Date(item.created_at).toLocaleString("th-TH")}
+                      </Text>
+                    </View>
+                  </View>
+                ))}
+              </ScrollView>
+            )}
+            <Button title="ปิด" outline onPress={() => setNotificationModal(false)} style={{ marginTop: 10 }} />
+          </Pressable>
+        </Pressable>
+      </Modal>
+      {noticeSheet()}
     </>
   );
 
@@ -2763,6 +3295,8 @@ export default function App() {
   if (!fontsLoaded || checkingSession) {
     return (
       <View style={s.loadingScreen}>
+        <AmbientBackground />
+        <Duck style={{ width: 140, height: 140 }} />
         <ActivityIndicator
           size="large"
           color={C.pink}
@@ -2771,6 +3305,7 @@ export default function App() {
         <Text style={s.loadingText}>
           กำลังโหลด TripBuddies...
         </Text>
+        {noticeSheet()}
       </View>
     );
   }
@@ -2783,6 +3318,8 @@ export default function App() {
     return (
       <SafeAreaView style={s.safe}>
         <StatusBar barStyle="dark-content" />
+        <AmbientBackground />
+        {noticeSheet()}
 
         <View style={s.landing}>
           <View style={s.landingTop}>
@@ -2848,6 +3385,8 @@ export default function App() {
     return (
       <SafeAreaView style={s.safe}>
         <StatusBar barStyle="dark-content" />
+        <AmbientBackground />
+        {noticeSheet()}
 
         <KeyboardAvoidingView
           style={{ flex: 1 }}
@@ -2903,7 +3442,7 @@ export default function App() {
                 style={s.forgot}
                 onPress={async () => {
                   if (!email.trim()) {
-                    Alert.alert(
+                    showAlert(
                       "ลืมรหัสผ่าน",
                       "กรุณากรอกอีเมลก่อน"
                     );
@@ -2916,12 +3455,12 @@ export default function App() {
                     );
 
                   if (error) {
-                    Alert.alert(
+                    showAlert(
                       "ส่งอีเมลไม่สำเร็จ",
                       error.message
                     );
                   } else {
-                    Alert.alert(
+                    showAlert(
                       "ส่งอีเมลแล้ว",
                       "กรุณาตรวจสอบอีเมลเพื่อรีเซ็ตรหัสผ่าน"
                     );
@@ -2971,6 +3510,8 @@ export default function App() {
     return (
       <SafeAreaView style={s.safe}>
         <StatusBar barStyle="dark-content" />
+        <AmbientBackground />
+        {noticeSheet()}
 
         <KeyboardAvoidingView
           style={{ flex: 1 }}
@@ -3106,6 +3647,7 @@ export default function App() {
         <StatusBar barStyle="dark-content" />
 
         <View style={s.appScreen}>
+          <AmbientBackground />
           <ScrollView
             contentContainerStyle={s.homeContent}
             keyboardShouldPersistTaps="handled"
@@ -3130,10 +3672,16 @@ export default function App() {
                 สร้างพื้นที่สำหรับวางแผนทริปร่วมกัน
               </Text>
 
+              <TouchableOpacity style={s.coverUploadButton} onPress={() => pickAndUploadImage("group-cover")}>
+                <Ionicons name="image-outline" size={18} color={C.pinkDark} />
+                <Text style={s.coverUploadText}>{groupCoverUrl ? "เปลี่ยนรูปปกกลุ่ม" : "เพิ่มรูปปกกลุ่ม"}</Text>
+              </TouchableOpacity>
+              {!!groupCoverUrl && <Image source={{ uri: groupCoverUrl }} style={s.coverPreview} />}
               <Button
                 title="+ สร้างกลุ่ม"
                 onPress={() => {
                   setGroupName("");
+                  setGroupCoverUrl("");
                   setGroupModal(true);
                 }}
               />
@@ -3173,6 +3721,7 @@ export default function App() {
 
             {groups.length === 0 ? (
               <View style={s.emptyTrip}>
+                <Duck style={{ width: 120, height: 120 }} />
                 <View style={s.emptyIconCircle}>
                   <Ionicons name="people-outline" size={26} color={C.muted} />
                 </View>
@@ -3239,6 +3788,9 @@ export default function App() {
 
             {activeGroup && (
               <View style={s.groupActionCard}>
+                {activeGroup.cover_url ? (
+                  <Image source={{ uri: activeGroup.cover_url }} style={s.groupCoverImage} />
+                ) : null}
                 <View style={s.groupDetailHeader}>
                   <View style={{ flex: 1 }}>
                     <Text style={s.groupCardTitle}>
@@ -3264,12 +3816,7 @@ export default function App() {
                   <TouchableOpacity
                     style={s.copyButton}
                     activeOpacity={0.8}
-                    onPress={() =>
-                      Alert.alert(
-                        "รหัสเชิญกลุ่ม",
-                        `รหัสเชิญของคุณคือ: ${activeGroup.invite_code}\n\nส่งรหัสนี้ให้เพื่อนเพื่อเข้าร่วมกลุ่มได้เลย!`
-                      )
-                    }
+                    onPress={copyInviteCode}
                   >
                     <Ionicons name="copy-outline" size={14} color={C.pinkDark} />
                     <Text style={s.copyButtonText}>คัดลอก</Text>
@@ -3297,20 +3844,45 @@ export default function App() {
 
                   return (
                     <View key={member.user_id} style={s.memberRow}>
-                      <View style={s.memberAvatar}>
-                        <Ionicons name="person" size={16} color={C.pinkDark} />
-                      </View>
+                      <TouchableOpacity
+                        style={s.memberAvatar}
+                        onPress={() => {
+                          const qr = memberQrMap[member.user_id] || {};
+                          setViewingQrModal({
+                            userId: member.user_id,
+                            name: member.profile?.full_name || memberDisplayName,
+                            amount: 0,
+                            promptpay: qr.promptpay || member.profile?.phone || "",
+                            bankName: qr.bankName || "",
+                            accountName: qr.accountName || member.profile?.full_name || "",
+                            qrUri: qr.qrUri || member.profile?.qr_code_url || "",
+                          });
+                        }}
+                      >
+                        {member.profile?.avatar_url ? (
+                          <Image source={{ uri: member.profile.avatar_url }} style={s.memberAvatarImage} />
+                        ) : (
+                          <Ionicons name="person" size={16} color={C.pinkDark} />
+                        )}
+                      </TouchableOpacity>
 
-                      <View style={{ flex: 1, paddingRight: 8 }}>
+                      <TouchableOpacity style={{ flex: 1, paddingRight: 8 }} onPress={() => {
+                        const qr = memberQrMap[member.user_id] || {};
+                        setViewingQrModal({
+                          userId: member.user_id,
+                          name: member.profile?.full_name || memberDisplayName,
+                          amount: 0,
+                          promptpay: qr.promptpay || member.profile?.phone || "",
+                          bankName: qr.bankName || "",
+                          accountName: qr.accountName || member.profile?.full_name || "",
+                          qrUri: qr.qrUri || member.profile?.qr_code_url || "",
+                        });
+                      }}>
                         <Text style={s.memberName}>{memberDisplayName}</Text>
                         <Text style={s.memberRoleSub}>
-                          {member.role === "owner"
-                            ? "เจ้าของกลุ่ม 👑"
-                            : member.role === "admin"
-                            ? "แอดมิน"
-                            : "สมาชิก"}
+                          {member.role === "owner" ? "เจ้าของกลุ่ม 👑" : member.role === "admin" ? "แอดมิน" : "สมาชิก"}
                         </Text>
-                      </View>
+                      </TouchableOpacity>
 
                       <TouchableOpacity
                         style={s.editNickBtn}
@@ -3361,9 +3933,8 @@ export default function App() {
 
                 <View style={s.divider} />
 
-                {trips.length > 0 && (
-                  <View style={{ marginBottom: 12 }}>
-                    <View style={s.memberHeaderRow}>
+                <View style={{ marginBottom: 12 }}>
+                  <View style={s.memberHeaderRow}>
                       <Text style={s.groupCardTitle}>
                         ทริปในกลุ่มนี้
                       </Text>
@@ -3374,7 +3945,13 @@ export default function App() {
                       </View>
                     </View>
 
-                    {trips.map((trip) => (
+                    {trips.length === 0 ? (
+                      <View style={s.emptyTrip}>
+                        <Duck style={{ width: 100, height: 100 }} />
+                        <Text style={s.emptyTripTitle}>ยังไม่มีทริปในกลุ่มนี้</Text>
+                        <Text style={s.emptyTripText}>สร้างทริปแรกเพื่อเริ่มบันทึกค่าใช้จ่าย</Text>
+                      </View>
+                    ) : trips.map((trip) => (
                       <TouchableOpacity
                         key={trip.id}
                         style={s.otherTripCard}
@@ -3382,7 +3959,9 @@ export default function App() {
                         onPress={() => openTripDetail(trip)}
                       >
                         <View style={s.otherTripIcon}>
-                          <Ionicons name="airplane-outline" size={18} color={C.pinkDark} />
+                          {trip.cover_url
+                            ? <Image source={{ uri: trip.cover_url }} style={s.tripListImage} />
+                            : <Ionicons name="airplane-outline" size={18} color={C.pinkDark} />}
                         </View>
                         <View style={{ flex: 1, paddingHorizontal: 10 }}>
                           <Text style={s.otherTripTitle} numberOfLines={1}>
@@ -3395,17 +3974,23 @@ export default function App() {
                         <Ionicons name="chevron-forward" size={16} color={C.muted} />
                       </TouchableOpacity>
                     ))}
-                    <View style={[s.divider, { marginTop: 12 }]} />
+                  <View style={[s.divider, { marginTop: 12 }]} />
                   </View>
-                )}
 
                 <Button
-                  title="สร้างทริปในกลุ่มนี้"
+                  title="สร้างทริปใหม่"
                   onPress={() => {
                     setTab("home");
                     setScreen("home");
                     createTrip();
                   }}
+                />
+                <Button
+                  title={activeGroup.created_by === userId || activeGroup.role === "owner" ? "ลบกลุ่ม" : "ออกจากกลุ่ม"}
+                  outline
+                  onPress={confirmGroupExit}
+                  disabled={groupActionBusy}
+                  style={{ marginTop: 10 }}
                 />
               </View>
             )}
@@ -3438,6 +4023,11 @@ export default function App() {
                   onChangeText={setGroupName}
                   icon="people-outline"
                 />
+                <TouchableOpacity style={s.coverUploadButton} onPress={() => pickAndUploadImage("group-cover")}>
+                  <Ionicons name="image-outline" size={18} color={C.pinkDark} />
+                  <Text style={s.coverUploadText}>{groupCoverUrl ? "เปลี่ยนรูปปก" : "อัปโหลดรูปปกกลุ่ม"}</Text>
+                </TouchableOpacity>
+                {!!groupCoverUrl && <Image source={{ uri: groupCoverUrl }} style={s.coverPreview} />}
 
                 <Button
                   title={
@@ -3516,6 +4106,18 @@ export default function App() {
 
   if (screen === "home") {
     const latestTrip = trips[0];
+    const groupSettlement = calculateSettlement(groupExpenses, members);
+    const owedToYou = groupSettlement.transfers
+      .filter((transfer) => transfer.to === userId)
+      .reduce((sum, transfer) => sum + transfer.amount, 0);
+    const youOwe = groupSettlement.transfers
+      .filter((transfer) => transfer.from === userId)
+      .reduce((sum, transfer) => sum + transfer.amount, 0);
+    const groupTotal = groupExpenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
+    const settledTotal = groupExpenses
+      .filter((expense) => expense.is_settled)
+      .reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
+    const repaymentProgress = groupTotal > 0 ? Math.min(settledTotal / groupTotal, 1) : 0;
 
     const remaining = Math.max(
       totalBudget - totalSpent,
@@ -3527,6 +4129,7 @@ export default function App() {
         <StatusBar barStyle="dark-content" />
 
         <View style={s.appScreen}>
+          <AmbientBackground />
           <ScrollView
             contentContainerStyle={s.homeContent}
             showsVerticalScrollIndicator={false}
@@ -3539,7 +4142,11 @@ export default function App() {
                 onPress={() => nav("profile")}
                 activeOpacity={0.8}
               >
-                <Duck style={s.homeAvatarImage} />
+                {profileAvatarUrl ? (
+                  <Image source={{ uri: profileAvatarUrl }} style={s.homeAvatarImage} />
+                ) : (
+                  <Duck style={s.homeAvatarImage} />
+                )}
               </TouchableOpacity>
 
               <TouchableOpacity
@@ -3562,15 +4169,12 @@ export default function App() {
               <TouchableOpacity
                 style={s.notification}
                 activeOpacity={0.8}
-                onPress={() =>
-                  Alert.alert(
-                    "การแจ้งเตือน",
-                    "ไม่มีการแจ้งเตือนใหม่ในขณะนี้"
-                  )
-                }
+                onPress={openNotifications}
               >
                 <Ionicons name="notifications-outline" size={20} color={C.text} />
-                <View style={s.notificationDot} />
+                {notificationRows.some((item) => !item.is_read) && (
+                  <View style={s.notificationDot} />
+                )}
               </TouchableOpacity>
             </View>
 
@@ -3664,6 +4268,7 @@ export default function App() {
               </TouchableOpacity>
             ) : (
               <View style={s.emptyTrip}>
+                <Duck style={{ width: 110, height: 110 }} />
                 <View style={s.emptyIconCircle}>
                   <Ionicons name="people-outline" size={26} color={C.muted} />
                 </View>
@@ -3709,7 +4314,9 @@ export default function App() {
                 onPress={() => openTripDetail(latestTrip)}
               >
                 <View style={s.tripPhoto}>
-                  <Ionicons name="compass" size={32} color={C.blue} />
+                  {latestTrip.cover_url
+                    ? <Image source={{ uri: latestTrip.cover_url }} style={s.tripPhotoImage} />
+                    : <Ionicons name="compass" size={32} color={C.blue} />}
                 </View>
 
                 <View style={s.tripInfo}>
@@ -3720,7 +4327,7 @@ export default function App() {
                     <View style={s.destinationBadge}>
                       <Ionicons name="location-sharp" size={11} color={C.pinkDark} />
                       <Text style={s.destinationText} numberOfLines={1}>
-                        {latestTrip.destination || "ไม่ระบุ"}
+                        {latestTrip.destination || "ทริปในกลุ่ม"}
                       </Text>
                     </View>
                   </View>
@@ -3736,6 +4343,7 @@ export default function App() {
               </TouchableOpacity>
             ) : (
               <View style={s.emptyTrip}>
+                <Duck style={{ width: 110, height: 110 }} />
                 <View style={s.emptyIconCircle}>
                   <Ionicons name="briefcase-outline" size={26} color={C.muted} />
                 </View>
@@ -3749,6 +4357,63 @@ export default function App() {
                 </Text>
               </View>
             )}
+
+            <View style={s.debtSummaryCard}>
+              <Text style={s.groupCardTitle}>สรุปยอดหนี้ในกลุ่ม</Text>
+              <View style={s.debtSummaryRow}>
+                <View style={s.debtSummaryItem}>
+                  <Text style={s.budgetChipLabel}>เพื่อนค้างเรา</Text>
+                  <Text style={[s.debtAmount, { color: C.green }]}>฿{owedToYou.toLocaleString()}</Text>
+                </View>
+                <View style={s.budgetChipDivider} />
+                <View style={s.debtSummaryItem}>
+                  <Text style={s.budgetChipLabel}>เราค้างเพื่อน</Text>
+                  <Text style={[s.debtAmount, { color: C.pinkDark }]}>฿{youOwe.toLocaleString()}</Text>
+                </View>
+              </View>
+              <View style={s.progressTrack}>
+                <View style={[s.progressValue, { width: `${repaymentProgress * 100}%` }]} />
+              </View>
+              <Text style={s.progressCaption}>
+                เคลียร์แล้ว ฿{settledTotal.toLocaleString()} จาก ฿{groupTotal.toLocaleString()}
+              </Text>
+              {groupSettlement.transfers.filter((transfer) => transfer.to === userId || transfer.from === userId).map((transfer) => {
+                const qrTarget = transfer.from === userId ? transfer.to : userId;
+                const qr = memberQrMap[qrTarget] || (qrTarget === userId ? userQrData : {});
+                return (
+                  <View
+                    key={`${transfer.from}-${transfer.to}`}
+                    style={s.debtTransferRow}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.debtTransferText}>
+                        {transfer.from === userId
+                          ? `คุณค้าง ${getMemberName(transfer.to)} ฿${transfer.amount.toLocaleString()}`
+                          : `${getMemberName(transfer.from)} ค้างคุณ ฿${transfer.amount.toLocaleString()}`}
+                      </Text>
+                      <TouchableOpacity
+                        onPress={() => setViewingQrModal({
+                          userId: qrTarget,
+                          name: qrTarget === userId ? name : getMemberName(qrTarget),
+                          amount: transfer.amount,
+                          promptpay: qr.promptpay || "",
+                          bankName: qr.bankName || "",
+                          accountName: qr.accountName || "",
+                          qrUri: qr.qrUri || "",
+                        })}
+                      >
+                        <Text style={s.debtTransferAction}>
+                          {transfer.from === userId ? "ดู QR เพื่อนเพื่อโอน" : "เปิด QR ของฉัน"}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                    <TouchableOpacity style={s.settleTransferButton} onPress={() => settleTransfer(transfer)}>
+                      <Text style={s.settleTransferText}>เคลียร์ยอด</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              })}
+            </View>
 
             {/* OTHER TRIPS IN GROUP */}
             {trips.length > 1 && (
@@ -3764,7 +4429,9 @@ export default function App() {
                     onPress={() => openTripDetail(trip)}
                   >
                     <View style={s.otherTripIcon}>
-                      <Ionicons name="airplane-outline" size={18} color={C.pinkDark} />
+                      {trip.cover_url
+                        ? <Image source={{ uri: trip.cover_url }} style={s.tripListImage} />
+                        : <Ionicons name="airplane-outline" size={18} color={C.pinkDark} />}
                     </View>
                     <View style={{ flex: 1, paddingHorizontal: 10 }}>
                       <Text style={s.otherTripTitle} numberOfLines={1}>
@@ -3864,7 +4531,7 @@ export default function App() {
                   if (trips.length > 0) {
                     openTripDetail(trips[0]);
                   } else if (!activeGroup) {
-                    Alert.alert(
+                    showAlert(
                       "ยังไม่ได้เลือกกลุ่ม",
                       "กรุณาเลือกหรือสร้างกลุ่มก่อนบันทึกค่าใช้จ่าย",
                       [
@@ -3873,7 +4540,7 @@ export default function App() {
                       ]
                     );
                   } else {
-                    Alert.alert(
+                    showAlert(
                       "ยังไม่มีทริป",
                       "กรุณาสร้างทริปแรกในกลุ่มก่อนบันทึกค่าใช้จ่าย",
                       [
@@ -3935,13 +4602,11 @@ export default function App() {
                   icon="map-outline"
                 />
 
-                <Input
-                  label="สถานที่"
-                  placeholder="เช่น เชียงใหม่"
-                  value={tripDestination}
-                  onChangeText={setTripDestination}
-                  icon="location-outline"
-                />
+                <TouchableOpacity style={s.coverUploadButton} onPress={() => pickAndUploadImage("trip-cover")}>
+                  <Ionicons name="image-outline" size={18} color={C.pinkDark} />
+                  <Text style={s.coverUploadText}>{tripCoverUrl ? "เปลี่ยนรูปปกทริป" : "เพิ่มรูปปกทริป"}</Text>
+                </TouchableOpacity>
+                {!!tripCoverUrl && <Image source={{ uri: tripCoverUrl }} style={s.coverPreview} />}
 
                 <Button
                   title={
@@ -3991,6 +4656,7 @@ export default function App() {
         <StatusBar barStyle="dark-content" />
 
         <View style={s.appScreen}>
+          <AmbientBackground />
           {/* HEADER */}
           <View style={s.tripDetailHeader}>
             <TouchableOpacity
@@ -4143,6 +4809,7 @@ export default function App() {
                   </View>
                 ) : tripExpenses.length === 0 ? (
                   <View style={s.emptyTrip}>
+                    <Duck style={{ width: 110, height: 110 }} />
                     <View style={s.emptyIconCircle}>
                       <Ionicons name="receipt-outline" size={26} color={C.muted} />
                     </View>
@@ -4188,12 +4855,7 @@ export default function App() {
                           <View style={{ flex: 1, paddingHorizontal: 10 }}>
                             <Text style={s.expenseItemTitle}>{exp.title}</Text>
                             <Text style={s.expenseDate}>
-                              {new Date(exp.created_at).toLocaleDateString("th-TH", {
-                                day: "numeric",
-                                month: "short",
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              })}
+                              {exp.is_settled ? "เคลียร์ยอดแล้ว" : "ยังไม่เคลียร์ยอด"}
                             </Text>
                           </View>
 
@@ -4201,6 +4863,12 @@ export default function App() {
                             <Text style={s.expenseItemAmount}>
                               ฿{Number(exp.amount).toLocaleString()}
                             </Text>
+                            {!exp.is_settled && (
+                              <TouchableOpacity onPress={() => settleExpense(exp)} style={s.settleBillButton}>
+                                <Ionicons name="checkmark-circle-outline" size={13} color={C.green} />
+                                <Text style={s.settleBillText}>เคลียร์บิล</Text>
+                              </TouchableOpacity>
+                            )}
                             <TouchableOpacity
                               onPress={() => deleteExpense(exp.id, exp.title)}
                               hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
@@ -4363,7 +5031,7 @@ export default function App() {
                               text += `${idx + 1}. ${fromName} ➔ โอนให้ ${toName}: ฿${tr.amount.toLocaleString()}\n`;
                             });
                             text += `--------------------------------\n*โอนน้อยที่สุดเพียง ${settlement.transfers.length} ครั้ง ✨`;
-                            Alert.alert("สรุปยอดเคลียร์เงิน", text);
+                            showAlert("สรุปยอดเคลียร์เงิน", text);
                           }}
                         >
                           <Ionicons name="share-outline" size={13} color={C.pinkDark} />
@@ -4595,6 +5263,7 @@ export default function App() {
         <StatusBar barStyle="dark-content" />
 
         <View style={s.profileScreen}>
+          <AmbientBackground />
           <ScrollView
             contentContainerStyle={s.profileContent}
           >
@@ -4606,11 +5275,26 @@ export default function App() {
               จัดการข้อมูลส่วนตัวของคุณ
             </Text>
 
+            <TouchableOpacity style={s.profileCoverWrap} onPress={() => pickAndUploadImage("profile-cover")}>
+              {profileCoverUrl ? (
+                <Image source={{ uri: profileCoverUrl }} style={s.profileCoverImage} />
+              ) : (
+                <View style={s.profileCoverPlaceholder}>
+                  <Ionicons name="image-outline" size={22} color={C.pinkDark} />
+                  <Text style={s.coverUploadText}>เพิ่มรูปปกโปรไฟล์</Text>
+                </View>
+              )}
+              <View style={s.coverEditBadge}><Ionicons name="camera-outline" size={15} color={C.white} /></View>
+            </TouchableOpacity>
+
             <View style={s.profileCard}>
               <View style={s.profileAvatarWrap}>
-                <View style={s.profileAvatarRing}>
-                  <Duck style={s.profileDuck} />
-                </View>
+                <TouchableOpacity style={s.profileAvatarRing} onPress={() => pickAndUploadImage("avatar")}>
+                  {profileAvatarUrl
+                    ? <Image source={{ uri: profileAvatarUrl }} style={s.profileAvatarImage} />
+                    : <Duck style={s.profileDuck} />}
+                  <View style={s.avatarEditBadge}><Ionicons name="camera" size={12} color={C.white} /></View>
+                </TouchableOpacity>
                 <View style={s.profileVerifiedBadge}>
                   <Ionicons name="checkmark" size={12} color={C.white} />
                 </View>
@@ -4660,6 +5344,13 @@ export default function App() {
 
               {userQrData?.qrUri || userQrData?.base64 || userQrData?.promptpay ? (
                 <View style={s.userQrPreviewBox}>
+                  {userQrData.qrUri ? (
+                    <Image
+                      source={{ uri: userQrData.qrUri }}
+                      style={s.profileQrLarge}
+                      resizeMode="contain"
+                    />
+                  ) : null}
                   <View style={s.userQrThumbWrap}>
                     {userQrData.qrUri || userQrData.base64 ? (
                       <Image
@@ -4751,10 +5442,7 @@ export default function App() {
                 style={s.settingRow}
                 activeOpacity={0.7}
                 onPress={() =>
-                  Alert.alert(
-                    "ข้อมูลส่วนตัว",
-                    "ระบบแก้ไขโปรไฟล์จะเปิดให้ใช้งานในเวอร์ชันถัดไป"
-                  )
+                  setProfileModal(true)
                 }
               >
                 <View style={[s.settingIconBox, { backgroundColor: C.pinkLight }]}>
@@ -4773,12 +5461,7 @@ export default function App() {
               <TouchableOpacity
                 style={s.settingRow}
                 activeOpacity={0.7}
-                onPress={() =>
-                  Alert.alert(
-                    "การแจ้งเตือน",
-                    "ระบบการแจ้งเตือนเปิดใช้งานอัตโนมัติเรียบร้อยแล้ว"
-                  )
-                }
+                onPress={openNotifications}
               >
                 <View style={[s.settingIconBox, { backgroundColor: C.blueLight }]}>
                   <Ionicons name="notifications-outline" size={18} color={C.blue} />
@@ -4797,7 +5480,7 @@ export default function App() {
                 style={s.settingRow}
                 activeOpacity={0.7}
                 onPress={() =>
-                  Alert.alert(
+                  showAlert(
                     "สกุลเงินที่ใช้",
                     `สกุลเงินหลักปัจจุบันของคุณคือ ${currency}`
                   )
@@ -4822,6 +5505,19 @@ export default function App() {
               style={{ marginTop: 22, borderColor: "#F3C5CD" }}
               onPress={logout}
             />
+
+            <Modal visible={profileModal} transparent animationType="slide" onRequestClose={() => setProfileModal(false)}>
+              <KeyboardAvoidingView style={s.sheetOverlay} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+                <View style={s.bottomSheet}>
+                  <View style={s.sheetHandle} />
+                  <Text style={s.modalTitle}>แก้ไขข้อมูลส่วนตัว</Text>
+                  <Input label="ชื่อ - นามสกุล" value={name} onChangeText={setName} icon="person-outline" />
+                  <Input label="เบอร์โทรศัพท์" value={phone} onChangeText={setPhone} keyboardType="phone-pad" icon="call-outline" />
+                  <Button title={busy ? "กำลังบันทึก..." : "บันทึกโปรไฟล์"} onPress={saveProfileData} disabled={busy} />
+                  <Button title="ยกเลิก" outline onPress={() => setProfileModal(false)} style={{ marginTop: 8 }} />
+                </View>
+              </KeyboardAvoidingView>
+            </Modal>
           </ScrollView>
 
           {bottomNav()}
@@ -4894,7 +5590,7 @@ const s = StyleSheet.create({
 
   button: {
     minHeight: 52,
-    borderRadius: 16,
+    borderRadius: 999,
     backgroundColor: C.pink,
     flexDirection: "row",
     alignItems: "center",
@@ -4942,17 +5638,15 @@ const s = StyleSheet.create({
   inputContainer: {
     minHeight: 50,
     borderRadius: 15,
-    borderWidth: 1,
-    borderColor: C.border,
-    backgroundColor: C.white,
+    borderWidth: 0,
+    backgroundColor: "#F3EAE3",
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 14,
     shadowColor: C.shadow,
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.8,
-    shadowRadius: 4,
-    elevation: 1,
+    shadowOpacity: 0,
+    elevation: 0,
   },
 
   inputIcon: {
@@ -5899,8 +6593,8 @@ const s = StyleSheet.create({
   // BUDGET - EXECUTIVE FINANCIAL CARD
 
   budgetCard: {
-    backgroundColor: C.white,
-    borderRadius: 24,
+    backgroundColor: "rgba(255,255,255,0.94)",
+    borderRadius: 28,
     borderWidth: 1,
     borderColor: C.border,
     padding: 18,
@@ -7878,6 +8572,347 @@ const s = StyleSheet.create({
     color: C.muted,
     marginTop: 2,
     textAlign: "center",
+  },
+
+  ambientOrb: {
+    position: "absolute",
+    borderRadius: 999,
+    opacity: 0.34,
+  },
+
+  ambientOrbPeach: {
+    width: 250,
+    height: 250,
+    right: -90,
+    top: 100,
+    backgroundColor: "#FFBE9D",
+  },
+
+  ambientOrbCoral: {
+    width: 190,
+    height: 190,
+    left: -100,
+    bottom: 100,
+    backgroundColor: "#F48C76",
+    opacity: 0.15,
+  },
+
+  duckSpeech: {
+    position: "absolute",
+    zIndex: 5,
+    bottom: -16,
+    left: "50%",
+    transform: [{ translateX: -100 }],
+    width: 200,
+    backgroundColor: C.white,
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    shadowColor: C.shadowMedium,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.16,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+
+  duckSpeechText: {
+    fontFamily: "Prompt_500Medium",
+    fontSize: 10,
+    color: C.text,
+    textAlign: "center",
+  },
+
+  sheetOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(34,20,17,0.34)",
+    justifyContent: "flex-end",
+  },
+
+  bottomSheet: {
+    width: "100%",
+    maxWidth: 520,
+    alignSelf: "center",
+    backgroundColor: C.white,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingHorizontal: 22,
+    paddingTop: 12,
+    paddingBottom: Platform.OS === "ios" ? 32 : 22,
+    shadowColor: "#38231D",
+    shadowOffset: { width: 0, height: -8 },
+    shadowOpacity: 0.16,
+    shadowRadius: 20,
+    elevation: 18,
+  },
+
+  sheetHandle: {
+    width: 42,
+    height: 5,
+    borderRadius: 999,
+    backgroundColor: "#E8D8D0",
+    alignSelf: "center",
+    marginBottom: 14,
+  },
+
+  notificationEmpty: {
+    alignItems: "center",
+    paddingVertical: 18,
+  },
+
+  notificationRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    padding: 13,
+    borderRadius: 16,
+    backgroundColor: "#FFF9F5",
+    marginTop: 10,
+  },
+
+  notificationUnread: {
+    backgroundColor: C.pinkLight,
+  },
+
+  notificationIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: C.white,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 10,
+  },
+
+  notificationDate: {
+    fontFamily: "Prompt_400Regular",
+    fontSize: 10,
+    color: C.muted,
+    marginTop: 3,
+  },
+
+  coverUploadButton: {
+    minHeight: 44,
+    borderRadius: 14,
+    backgroundColor: C.pinkLight,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    marginVertical: 8,
+  },
+
+  coverUploadText: {
+    fontFamily: "Prompt_600SemiBold",
+    fontSize: 12,
+    color: C.pinkDark,
+    marginLeft: 7,
+  },
+
+  coverPreview: {
+    width: "100%",
+    height: 130,
+    borderRadius: 16,
+    marginBottom: 12,
+  },
+
+  groupCoverImage: {
+    width: "100%",
+    height: 150,
+    borderRadius: 18,
+    marginBottom: 14,
+  },
+
+  memberAvatarImage: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+  },
+
+  profileCoverWrap: {
+    height: 150,
+    marginTop: 16,
+    borderRadius: 22,
+    overflow: "hidden",
+    backgroundColor: C.pinkLight,
+  },
+
+  profileCoverImage: {
+    width: "100%",
+    height: "100%",
+  },
+
+  profileCoverPlaceholder: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  coverEditBadge: {
+    position: "absolute",
+    right: 12,
+    bottom: 12,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: C.pinkDark,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  avatarEditBadge: {
+    position: "absolute",
+    right: 1,
+    bottom: 1,
+    width: 23,
+    height: 23,
+    borderRadius: 12,
+    backgroundColor: C.pinkDark,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  profileAvatarImage: {
+    width: "100%",
+    height: "100%",
+    borderRadius: 44,
+  },
+
+  profileQrLarge: {
+    width: 210,
+    height: 210,
+    alignSelf: "center",
+    backgroundColor: C.white,
+    borderRadius: 16,
+    marginVertical: 12,
+  },
+
+  tripPhotoImage: {
+    width: "100%",
+    height: "100%",
+    borderRadius: 16,
+  },
+
+  debtSummaryCard: {
+    backgroundColor: "rgba(255,255,255,0.94)",
+    borderRadius: 28,
+    padding: 18,
+    marginBottom: 18,
+    shadowColor: C.shadow,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.8,
+    shadowRadius: 12,
+    elevation: 3,
+  },
+
+  debtSummaryRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 12,
+    marginBottom: 15,
+  },
+
+  debtSummaryItem: {
+    flex: 1,
+  },
+
+  debtAmount: {
+    fontFamily: "Prompt_700Bold",
+    fontSize: 19,
+    marginTop: 3,
+  },
+
+  progressTrack: {
+    height: 9,
+    borderRadius: 999,
+    backgroundColor: "#F1E5DE",
+    overflow: "hidden",
+  },
+
+  progressValue: {
+    height: "100%",
+    borderRadius: 999,
+    backgroundColor: C.green,
+  },
+
+  progressCaption: {
+    fontFamily: "Prompt_400Regular",
+    fontSize: 10,
+    color: C.textMuted,
+    marginTop: 6,
+  },
+
+  debtTransferRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: C.borderLight,
+    marginTop: 8,
+  },
+
+  debtTransferText: {
+    flex: 1,
+    fontFamily: "Prompt_500Medium",
+    fontSize: 11,
+    color: C.text,
+  },
+
+  debtTransferAction: {
+    fontFamily: "Prompt_600SemiBold",
+    fontSize: 10,
+    color: C.pinkDark,
+  },
+
+  settleBillButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 4,
+    paddingHorizontal: 7,
+    marginTop: 3,
+    borderRadius: 10,
+    backgroundColor: C.greenLight,
+  },
+
+  settleBillText: {
+    fontFamily: "Prompt_600SemiBold",
+    color: C.green,
+    fontSize: 10,
+    marginLeft: 3,
+  },
+
+  tripListImage: {
+    width: "100%",
+    height: "100%",
+    borderRadius: 12,
+  },
+
+  settleTransferButton: {
+    marginLeft: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: C.greenLight,
+  },
+
+  settleTransferText: {
+    fontFamily: "Prompt_600SemiBold",
+    fontSize: 10,
+    color: C.green,
+  },
+
+  loadingOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(34,20,17,0.28)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+
+  loadingCard: {
+    width: 230,
+    alignItems: "center",
+    backgroundColor: C.white,
+    borderRadius: 28,
+    padding: 20,
   },
 });
 
