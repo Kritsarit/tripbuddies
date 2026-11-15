@@ -616,6 +616,9 @@ export default function App() {
   const [members, setMembers] = useState([]);
   const [groupExpenses, setGroupExpenses] = useState([]);
   const [settlements, setSettlements] = useState([]);
+  const [repaymentSheet, setRepaymentSheet] = useState(null);
+  const [settlementSlipUrl, setSettlementSlipUrl] = useState("");
+  const [reviewSettlement, setReviewSettlement] = useState(null);
 
   const [groupName, setGroupName] = useState("");
   const [joinCode, setJoinCode] = useState("");
@@ -851,6 +854,144 @@ export default function App() {
             <Text style={s.loadingText}>กำลังบันทึกข้อมูล...</Text>
           </View>
         </View>
+      </Modal>
+      <Modal
+        visible={!!repaymentSheet}
+        transparent
+        animationType="slide"
+        onRequestClose={() => {
+          setRepaymentSheet(null);
+          setSettlementSlipUrl("");
+        }}
+      >
+        <Pressable
+          style={s.sheetOverlay}
+          onPress={() => {
+            setRepaymentSheet(null);
+            setSettlementSlipUrl("");
+          }}
+        >
+          <Pressable style={[s.bottomSheet, s.settlementSheet]} onPress={() => {}}>
+            <View style={s.sheetHandle} />
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={s.modalTitle}>โอนคืน / แนบสลิป</Text>
+              <Text style={s.modalSubtitle}>
+                โอนให้ {repaymentSheet?.recipientName} แล้วแนบหลักฐานเพื่อรอตรวจสอบ
+              </Text>
+              <Text style={s.settlementAmount}>
+                {baht(repaymentSheet?.transfer?.amount)}
+              </Text>
+              <View style={s.settlementQrWrap}>
+                {repaymentSheet?.qrUri ? (
+                  <Image
+                    source={{ uri: repaymentSheet.qrUri }}
+                    style={s.settlementQrImage}
+                    resizeMode="contain"
+                  />
+                ) : repaymentSheet?.promptpay ? (
+                  <Image
+                    source={{
+                      uri: `https://promptpay.io/${repaymentSheet.promptpay.replace(/[^0-9]/g, "")}/${repaymentSheet.transfer?.amount}.png`,
+                    }}
+                    style={s.settlementQrImage}
+                    resizeMode="contain"
+                  />
+                ) : (
+                  <View style={s.settlementNoQr}>
+                    <Ionicons name="qr-code-outline" size={38} color={C.muted} />
+                    <Text style={s.settlementNoQrText}>
+                      {repaymentSheet?.recipientName} ยังไม่ได้เพิ่ม QR Code รับเงิน
+                    </Text>
+                  </View>
+                )}
+              </View>
+              <TouchableOpacity
+                style={s.settlementUploadButton}
+                onPress={pickSettlementSlip}
+                disabled={busy}
+              >
+                <Ionicons name="image-outline" size={18} color={C.pinkDark} />
+                <Text style={s.settlementUploadButtonText}>
+                  {settlementSlipUrl ? "เลือกรูปสลิปใหม่" : "เลือกรูปสลิปโอนเงิน"}
+                </Text>
+              </TouchableOpacity>
+              {!!settlementSlipUrl && (
+                <Image
+                  source={{ uri: settlementSlipUrl }}
+                  style={s.settlementSlipPreview}
+                  resizeMode="contain"
+                />
+              )}
+              <Button
+                title="ส่งสลิปให้เจ้าหนี้ตรวจสอบ"
+                onPress={submitSettlementSlip}
+                disabled={busy || !settlementSlipUrl}
+                style={{ marginTop: 12 }}
+              />
+              <Button
+                title="ยกเลิก"
+                outline
+                onPress={() => {
+                  setRepaymentSheet(null);
+                  setSettlementSlipUrl("");
+                }}
+                style={{ marginTop: 8 }}
+              />
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+      <Modal
+        visible={!!reviewSettlement}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setReviewSettlement(null)}
+      >
+        <Pressable style={s.sheetOverlay} onPress={() => setReviewSettlement(null)}>
+          <Pressable style={[s.bottomSheet, s.settlementSheet]} onPress={() => {}}>
+            <View style={s.sheetHandle} />
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={s.modalTitle}>ตรวจสอบสลิปโอนเงิน</Text>
+              <Text style={s.modalSubtitle}>
+                {reviewSettlement
+                  ? `${getMemberName(reviewSettlement.payer_id)} โอนให้คุณ ${baht(reviewSettlement.amount)}`
+                  : ""}
+              </Text>
+              {reviewSettlement?.slip_url ? (
+                <Image
+                  source={{ uri: reviewSettlement.slip_url }}
+                  style={s.settlementReviewImage}
+                  resizeMode="contain"
+                />
+              ) : (
+                <View style={s.settlementNoQr}>
+                  <Ionicons name="image-outline" size={38} color={C.muted} />
+                  <Text style={s.settlementNoQrText}>ไม่พบรูปสลิป</Text>
+                </View>
+              )}
+              <Button
+                title="อนุมัติยอด (ยืนยันรับเงิน)"
+                icon="checkmark-circle-outline"
+                onPress={() => updateSettlementStatus(reviewSettlement, "approved")}
+                disabled={busy || !reviewSettlement?.slip_url}
+              />
+              <Button
+                title="ปฏิเสธสลิป"
+                outline
+                onPress={() => updateSettlementStatus(reviewSettlement, "rejected")}
+                disabled={busy}
+                style={{ marginTop: 8, borderColor: C.red }}
+                textStyle={{ color: C.red }}
+              />
+              <Button
+                title="ปิด"
+                outline
+                onPress={() => setReviewSettlement(null)}
+                style={{ marginTop: 8 }}
+              />
+            </ScrollView>
+          </Pressable>
+        </Pressable>
       </Modal>
       <Toast toast={toast} onDismiss={dismissToast} />
     </>
@@ -2307,10 +2448,11 @@ export default function App() {
     });
 
     payments.forEach((p) => {
+      if (p.status !== "approved") return;
       const a = Number(p.amount) || 0;
       if (a <= 0) return;
-      net[p.from_user] = (net[p.from_user] || 0) + a;
-      net[p.to_user] = (net[p.to_user] || 0) - a;
+      net[p.payer_id] = (net[p.payer_id] || 0) + a;
+      net[p.receiver_id] = (net[p.receiver_id] || 0) - a;
     });
 
     const creditors = [];
@@ -2395,7 +2537,7 @@ export default function App() {
     }
     const { data, error } = await supabase
       .from("settlements")
-      .select("id, group_id, trip_id, from_user, to_user, amount, created_at")
+      .select("id, group_id, payer_id, receiver_id, amount, slip_url, status")
       .eq("group_id", groupId);
     if (error) throw error;
     setSettlements((data || []).map((r) => ({ ...r, amount: Number(r.amount) })));
@@ -2530,50 +2672,177 @@ export default function App() {
     setExpenseModal(true);
   };
 
-  const settleTransfer = (transfer, tripId = null) => {
+  const pendingSettlementsForTransfer = (transfer) =>
+    settlements.filter(
+      (row) =>
+        row.status === "pending" &&
+        row.payer_id === transfer.from &&
+        row.receiver_id === transfer.to
+    );
+
+  const openRepaymentSheet = (transfer) => {
+    if (transfer.from !== userId) {
+      showAlert("ทำรายการไม่ได้", "แนบสลิปได้เฉพาะรายการที่คุณเป็นผู้โอน");
+      return;
+    }
+    const recipient = members.find((member) => member.user_id === transfer.to);
+    const qr = memberQrMap[transfer.to] || {};
+    setSettlementSlipUrl("");
+    setRepaymentSheet({
+      transfer,
+      recipientName: getMemberName(transfer.to),
+      qrUri: qr.qrUri || recipient?.profile?.qr_code_url || "",
+      promptpay: qr.promptpay || recipient?.profile?.phone || "",
+    });
+  };
+
+  const pickSettlementSlip = async () => {
     if (isOffline) {
       showToast("ไม่มีอินเทอร์เน็ต", "error");
       return;
     }
-    if (transfer.from !== userId && transfer.to !== userId) {
-      showAlert("ทำรายการไม่ได้", "บันทึกการโอนได้เฉพาะรายการที่คุณเป็นผู้โอนหรือผู้รับเงิน");
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (permission.status !== "granted") {
+        showAlert("ต้องอนุญาตเข้าถึงรูปภาพ", "อนุญาตให้ TripBuddies เข้าถึงคลังรูปภาพเพื่อแนบสลิป");
+        return;
+      }
+      const selection = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsEditing: false,
+        quality: 0.9,
+        base64: true,
+      });
+      if (selection.canceled || !selection.assets?.[0]) return;
+
+      setBusy(true);
+      const url = await uploadImageAsset(selection.assets[0], "settlement-slips");
+      setSettlementSlipUrl(url);
+      showToast("อัปโหลดสลิปเรียบร้อยแล้ว");
+    } catch (error) {
+      showAlert("อัปโหลดสลิปไม่สำเร็จ", friendlyError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitSettlementSlip = async () => {
+    if (isOffline) {
+      showToast("ไม่มีอินเทอร์เน็ต", "error");
       return;
     }
-    showAlert(
-      "ยืนยันการโอนเงิน",
-      `บันทึกว่า ${getMemberName(transfer.from)} โอนให้ ${getMemberName(transfer.to)} จำนวน ${baht(transfer.amount)} แล้วใช่ไหม?`,
-      [
-        { text: "ยกเลิก", style: "cancel" },
-        {
-          text: "ยืนยัน",
-          onPress: async () => {
-            try {
-              const connectivity = await NetInfo.fetch();
-              if (connectivity.isConnected === false || connectivity.isInternetReachable === false) {
-                setIsOffline(true);
-                showToast("ไม่มีอินเทอร์เน็ต", "error");
-                return;
-              }
-              setBusy(true);
-              const { error } = await supabase.from("settlements").insert({
-                group_id: activeGroup.id,
-                trip_id: tripId,
-                from_user: transfer.from,
-                to_user: transfer.to,
-                amount: transfer.amount,
-              });
-              if (error) throw error;
-              await loadSettlements(activeGroup.id);
-              showToast("บันทึกการโอนเรียบร้อยแล้ว");
-            } catch (e) {
-              showAlert("บันทึกไม่สำเร็จ", friendlyError(e));
-            } finally {
-              setBusy(false);
-            }
-          },
-        },
-      ]
-    );
+    if (!activeGroup?.id || !repaymentSheet?.transfer || !settlementSlipUrl) {
+      showAlert("แนบสลิปไม่ครบ", "กรุณาเลือกรูปสลิปก่อนส่งให้เจ้าหนี้ตรวจสอบ");
+      return;
+    }
+
+    const { transfer, recipientName } = repaymentSheet;
+    if (transfer.from !== userId) {
+      showAlert("ทำรายการไม่ได้", "บัญชีนี้ไม่ใช่ผู้โอนของรายการดังกล่าว");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const connectivity = await NetInfo.fetch();
+      if (connectivity.isConnected === false || connectivity.isInternetReachable === false) {
+        setIsOffline(true);
+        showToast("ไม่มีอินเทอร์เน็ต", "error");
+        return;
+      }
+
+      const { error } = await supabase.from("settlements").insert({
+        group_id: activeGroup.id,
+        payer_id: transfer.from,
+        receiver_id: transfer.to,
+        amount: transfer.amount,
+        slip_url: settlementSlipUrl,
+        status: "pending",
+      });
+      if (error) throw error;
+
+      setRepaymentSheet(null);
+      setSettlementSlipUrl("");
+      const followUpErrors = [];
+      try {
+        await loadSettlements(activeGroup.id);
+      } catch (error) {
+        followUpErrors.push(`โหลดสถานะ: ${friendlyError(error)}`);
+      }
+      try {
+        const { error: notificationError } = await supabase.from("notifications").insert({
+          user_id: transfer.to,
+          title: "มีสลิปโอนเงินให้ตรวจสอบ",
+          message: `${getMemberName(userId)} ส่งสลิปโอน ${baht(transfer.amount)} ให้คุณ`,
+          type: "settlement",
+          is_read: false,
+        });
+        if (notificationError) throw notificationError;
+      } catch (error) {
+        followUpErrors.push(`ส่งแจ้งเตือน: ${friendlyError(error)}`);
+      }
+
+      if (followUpErrors.length) {
+        showAlert("ส่งสลิปแล้ว", `บันทึกสลิปถึง ${recipientName} แล้ว แต่${followUpErrors.join(" และ")}`);
+      } else {
+        showToast("ส่งสลิปให้เจ้าหนี้ตรวจสอบแล้ว");
+      }
+    } catch (error) {
+      showAlert("ส่งสลิปไม่สำเร็จ", friendlyError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openSettlementReview = (settlement) => {
+    if (settlement.receiver_id !== userId || settlement.status !== "pending") {
+      showAlert("ทำรายการไม่ได้", "ตรวจสอบได้เฉพาะสลิปที่รอคุณยืนยัน");
+      return;
+    }
+    setReviewSettlement(settlement);
+  };
+
+  const updateSettlementStatus = async (settlement, status) => {
+    if (isOffline) {
+      showToast("ไม่มีอินเทอร์เน็ต", "error");
+      return;
+    }
+    if (
+      settlement.receiver_id !== userId ||
+      settlement.status !== "pending" ||
+      !["approved", "rejected"].includes(status)
+    ) {
+      showAlert("ทำรายการไม่ได้", "สลิปนี้ไม่อยู่ในสถานะที่ตรวจสอบได้");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const connectivity = await NetInfo.fetch();
+      if (connectivity.isConnected === false || connectivity.isInternetReachable === false) {
+        setIsOffline(true);
+        showToast("ไม่มีอินเทอร์เน็ต", "error");
+        return;
+      }
+      const { data, error } = await supabase
+        .from("settlements")
+        .update({ status })
+        .eq("id", settlement.id)
+        .eq("receiver_id", userId)
+        .eq("status", "pending")
+        .select("id")
+        .maybeSingle();
+      if (error) throw error;
+      if (!data) throw new Error("สลิปนี้ถูกตรวจสอบไปแล้ว กรุณาโหลดรายการใหม่");
+
+      setReviewSettlement(null);
+      await loadSettlements(activeGroup.id);
+      showToast(status === "approved" ? "ยืนยันรับเงินเรียบร้อยแล้ว" : "ปฏิเสธสลิปแล้ว");
+    } catch (error) {
+      showAlert("อัปเดตสถานะไม่สำเร็จ", friendlyError(error));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const deleteExpense = (expId, expTitle) => {
@@ -4583,7 +4852,9 @@ export default function App() {
       .filter((transfer) => transfer.from === userId)
       .reduce((sum, transfer) => sum + transfer.amount, 0);
     const groupTotal = groupExpenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
-    const paidBack = settlements.reduce((s, p) => s + p.amount, 0);
+    const paidBack = settlements
+      .filter((payment) => payment.status === "approved")
+      .reduce((sum, payment) => sum + payment.amount, 0);
     const repaymentProgress = groupTotal > 0 ? Math.min(paidBack / groupTotal, 1) : 0;
 
     return (
@@ -4842,6 +5113,7 @@ export default function App() {
               {groupSettlement.transfers.filter((transfer) => transfer.to === userId || transfer.from === userId).map((transfer) => {
                 const qrTarget = transfer.from === userId ? transfer.to : userId;
                 const qr = memberQrMap[qrTarget] || (qrTarget === userId ? userQrData : {});
+                const pendingSlips = pendingSettlementsForTransfer(transfer);
                 return (
                   <View
                     key={`${transfer.from}-${transfer.to}`}
@@ -4861,20 +5133,43 @@ export default function App() {
                           promptpay: qr.promptpay || "",
                           bankName: qr.bankName || "",
                           accountName: qr.accountName || "",
-                          qrUri: qr.qrUri || "",
+                          qrUri: qr.qrUri || members.find((member) => member.user_id === qrTarget)?.profile?.qr_code_url || "",
                         })}
                       >
                         <Text style={s.debtTransferAction}>
                           {transfer.from === userId ? "ดู QR เพื่อนเพื่อโอน" : "เปิด QR ของฉัน"}
                         </Text>
                       </TouchableOpacity>
+                      {transfer.from === userId && pendingSlips.length > 0 && (
+                        <Text style={s.settlementPendingLabel}>รอเจ้าหนี้ตรวจสอบ</Text>
+                      )}
                     </View>
-                    <TouchableOpacity style={s.settleTransferButton} onPress={() => settleTransfer(transfer)}>
-                      <Text style={s.settleTransferText}>เคลียร์ยอด</Text>
-                    </TouchableOpacity>
+                    {transfer.from === userId && pendingSlips.length === 0 && (
+                      <TouchableOpacity
+                        style={s.settleTransferButton}
+                        onPress={() => openRepaymentSheet(transfer)}
+                      >
+                        <Text style={s.settleTransferText}>โอนคืน / แนบสลิป</Text>
+                      </TouchableOpacity>
+                    )}
                   </View>
                 );
               })}
+              {settlements
+                .filter((slip) => slip.receiver_id === userId && slip.status === "pending")
+                .map((slip) => (
+                  <View key={slip.id} style={s.debtTransferRow}>
+                    <Text style={[s.debtTransferText, { flex: 1 }]}>
+                      {getMemberName(slip.payer_id)} ส่งสลิป {baht(slip.amount)}
+                    </Text>
+                    <TouchableOpacity
+                      style={[s.settleTransferButton, s.settlementReviewButton]}
+                      onPress={() => openSettlementReview(slip)}
+                    >
+                      <Text style={s.settleTransferText}>ตรวจสอบสลิป</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))}
             </View>
 
             {/* OTHER TRIPS IN GROUP */}
@@ -5108,11 +5403,7 @@ export default function App() {
       (sum, item) => sum + Number(item.amount || 0),
       0
     );
-    const settlement = calculateSettlement(
-      tripExpenses,
-      members,
-      settlements.filter((p) => p.trip_id === currentTrip?.id)
-    );
+    const settlement = calculateSettlement(tripExpenses, members);
 
     return (
       <SafeAreaView style={s.safe}>
@@ -5525,6 +5816,7 @@ export default function App() {
                       const toName = getMemberName(tr.to);
                       const isMeSender = tr.from === userId;
                       const isMeReceiver = tr.to === userId;
+                      const pendingSlips = pendingSettlementsForTransfer(tr);
                       const receiverQr =
                         memberQrMap[tr.to] || (tr.to === userId ? userQrData : null);
 
@@ -5609,14 +5901,32 @@ export default function App() {
                             </View>
                           </TouchableOpacity>
 
-                          {(tr.from === userId || tr.to === userId) && (
+                          {isMeSender && pendingSlips.length > 0 && (
+                            <Text style={s.settlementPendingLabel}>
+                              รอเจ้าหนี้ตรวจสอบ
+                            </Text>
+                          )}
+
+                          {isMeSender && pendingSlips.length === 0 && (
                             <TouchableOpacity
                               style={[s.settleTransferButton, { marginLeft: 0, marginTop: 8, width: "100%", alignItems: "center" }]}
-                              onPress={() => settleTransfer(tr, currentTrip.id)}
+                              onPress={() => openRepaymentSheet(tr)}
                             >
-                              <Text style={s.settleTransferText}>บันทึกว่าโอนแล้ว</Text>
+                              <Text style={s.settleTransferText}>โอนคืน / แนบสลิป</Text>
                             </TouchableOpacity>
                           )}
+
+                          {isMeReceiver && pendingSlips.map((slip) => (
+                            <TouchableOpacity
+                              key={slip.id}
+                              style={[s.settleTransferButton, s.settlementReviewButton]}
+                              onPress={() => openSettlementReview(slip)}
+                            >
+                              <Text style={s.settleTransferText}>
+                                ตรวจสอบสลิป • {baht(slip.amount)}
+                              </Text>
+                            </TouchableOpacity>
+                          ))}
 
                           {!receiverQr?.promptpay && !receiverQr?.qrUri && tr.to === userId && (
                             <TouchableOpacity
@@ -9193,6 +9503,88 @@ const s = StyleSheet.create({
     elevation: 18,
   },
 
+  settlementSheet: {
+    maxHeight: "92%",
+  },
+
+  settlementAmount: {
+    fontFamily: "Prompt_700Bold",
+    fontSize: 30,
+    lineHeight: 40,
+    color: C.pinkDark,
+    textAlign: "center",
+    marginBottom: 10,
+  },
+
+  settlementQrWrap: {
+    width: 220,
+    height: 220,
+    alignSelf: "center",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: R.md,
+    borderWidth: 1,
+    borderColor: C.borderLight,
+    backgroundColor: C.white,
+    marginBottom: 12,
+    overflow: "hidden",
+  },
+
+  settlementQrImage: {
+    width: 204,
+    height: 204,
+  },
+
+  settlementNoQr: {
+    minHeight: 150,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 18,
+  },
+
+  settlementNoQrText: {
+    fontFamily: "Prompt_400Regular",
+    fontSize: 13,
+    lineHeight: 20,
+    color: C.muted,
+    textAlign: "center",
+    marginTop: 8,
+  },
+
+  settlementUploadButton: {
+    minHeight: 44,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: R.md,
+    backgroundColor: C.pinkLight,
+    marginTop: 4,
+  },
+
+  settlementUploadButtonText: {
+    fontFamily: "Prompt_600SemiBold",
+    fontSize: 13,
+    lineHeight: 20,
+    color: C.pinkDark,
+    marginLeft: 7,
+  },
+
+  settlementSlipPreview: {
+    width: "100%",
+    height: 190,
+    borderRadius: R.md,
+    backgroundColor: C.surface,
+    marginTop: 10,
+  },
+
+  settlementReviewImage: {
+    width: "100%",
+    height: 360,
+    borderRadius: R.md,
+    backgroundColor: C.surface,
+    marginVertical: 12,
+  },
+
   sheetHandle: {
     width: 42,
     height: 5,
@@ -9410,6 +9802,14 @@ const s = StyleSheet.create({
     color: C.pinkDark,
   },
 
+  settlementPendingLabel: {
+    fontFamily: "Prompt_600SemiBold",
+    fontSize: 11,
+    lineHeight: 18,
+    color: C.amber,
+    marginTop: 5,
+  },
+
   tripListImage: {
     width: "100%",
     height: "100%",
@@ -9428,6 +9828,12 @@ const s = StyleSheet.create({
     fontFamily: "Prompt_600SemiBold",
     fontSize: 11,
     color: C.green,
+  },
+
+  settlementReviewButton: {
+    alignSelf: "flex-start",
+    marginLeft: 0,
+    marginTop: 6,
   },
 
   loadingOverlay: {
